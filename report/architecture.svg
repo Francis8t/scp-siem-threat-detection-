@@ -1,0 +1,115 @@
+<svg viewBox="0 0 1200 690" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#475569"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#15803d"/>
+    </marker>
+  </defs>
+
+  <!-- card background -->
+  <rect x="0" y="0" width="1200" height="690" rx="14" fill="#fcfcfd" stroke="#e5e7eb"/>
+
+  <!-- title -->
+  <text x="600" y="36" text-anchor="middle" font-size="22" font-weight="700" fill="#1f2937">SIEM-lite Real-Time Threat Detection — Lambda Architecture (AWS)</text>
+  <text x="600" y="58" text-anchor="middle" font-size="13" fill="#6b7280">Loghub OpenSSH replayed into Kinesis · speed layer (freshness) + batch layer (correctness) + serving layer (merge)</text>
+
+  <!-- ================= LANE BACKGROUNDS ================= -->
+  <rect x="420" y="100" width="760" height="130" rx="12" fill="#fff7ed" stroke="#fdba74" stroke-dasharray="5 4"/>
+  <text x="436" y="122" font-size="12" font-weight="700" fill="#c2410c">SPEED LAYER · catch the attack live</text>
+
+  <rect x="420" y="250" width="760" height="205" rx="12" fill="#eff6ff" stroke="#93c5fd" stroke-dasharray="5 4"/>
+  <text x="436" y="272" font-size="12" font-weight="700" fill="#1d4ed8">BATCH LAYER · authoritative full-history reputation</text>
+
+  <rect x="420" y="478" width="760" height="172" rx="12" fill="#f0fdf4" stroke="#86efac" stroke-dasharray="5 4"/>
+  <text x="436" y="500" font-size="12" font-weight="700" fill="#15803d">SERVING LAYER · merge into a higher-confidence signal</text>
+
+  <!-- ================= INGESTION ================= -->
+  <rect x="40" y="150" width="150" height="52" rx="8" fill="#ede9fe" stroke="#7c3aed"/>
+  <text x="115" y="172" text-anchor="middle" font-size="13" font-weight="600" fill="#1f2937">OpenSSH logs</text>
+  <text x="115" y="189" text-anchor="middle" font-size="10.5" fill="#4b5563">Loghub · 655k events</text>
+
+  <rect x="40" y="235" width="150" height="52" rx="8" fill="#ede9fe" stroke="#7c3aed"/>
+  <text x="115" y="257" text-anchor="middle" font-size="13" font-weight="600" fill="#1f2937">Replay producer</text>
+  <text x="115" y="274" text-anchor="middle" font-size="10.5" fill="#4b5563">boto3 · paced</text>
+
+  <rect x="230" y="175" width="160" height="95" rx="8" fill="#ddd6fe" stroke="#6d28d9"/>
+  <text x="310" y="210" text-anchor="middle" font-size="13" font-weight="700" fill="#1f2937">Kinesis Data</text>
+  <text x="310" y="227" text-anchor="middle" font-size="13" font-weight="700" fill="#1f2937">Streams</text>
+  <text x="310" y="246" text-anchor="middle" font-size="10.5" fill="#4b5563">PK = source_ip</text>
+  <text x="310" y="261" text-anchor="middle" font-size="10.5" fill="#4b5563">1 shard (baseline)</text>
+
+  <!-- ================= SPEED ================= -->
+  <rect x="470" y="128" width="190" height="64" rx="8" fill="#ffedd5" stroke="#ea580c"/>
+  <text x="565" y="152" text-anchor="middle" font-size="13" font-weight="600" fill="#1f2937">AWS Lambda — speed</text>
+  <text x="565" y="170" text-anchor="middle" font-size="10.5" fill="#4b5563">5-min sliding-window count</text>
+  <text x="565" y="212" text-anchor="middle" font-size="10" font-style="italic" fill="#9a3412">native concurrency · scales by shard</text>
+
+  <rect x="720" y="128" width="200" height="64" rx="8" fill="#ffedd5" stroke="#ea580c"/>
+  <text x="820" y="152" text-anchor="middle" font-size="13" font-weight="600" fill="#1f2937">DynamoDB (speed view)</text>
+  <text x="820" y="170" text-anchor="middle" font-size="10.5" fill="#4b5563">30s buckets×10 · TTL · alerts</text>
+
+  <!-- ================= BATCH ================= -->
+  <rect x="470" y="284" width="160" height="54" rx="8" fill="#dbeafe" stroke="#2563eb"/>
+  <text x="550" y="308" text-anchor="middle" font-size="13" font-weight="600" fill="#1f2937">Kinesis Firehose</text>
+  <text x="550" y="325" text-anchor="middle" font-size="10.5" fill="#4b5563">buffered delivery</text>
+
+  <rect x="670" y="284" width="200" height="54" rx="8" fill="#dbeafe" stroke="#2563eb"/>
+  <text x="770" y="308" text-anchor="middle" font-size="13" font-weight="600" fill="#1f2937">S3  raw/</text>
+  <text x="770" y="325" text-anchor="middle" font-size="10.5" fill="#4b5563">immutable master · partitioned</text>
+
+  <rect x="470" y="372" width="240" height="66" rx="8" fill="#dbeafe" stroke="#2563eb"/>
+  <text x="590" y="397" text-anchor="middle" font-size="13" font-weight="600" fill="#1f2937">EMR — PySpark + MapReduce</text>
+  <text x="590" y="415" text-anchor="middle" font-size="10.5" fill="#4b5563">per-IP counts · top-N · first/last-seen</text>
+
+  <rect x="760" y="372" width="200" height="66" rx="8" fill="#dbeafe" stroke="#2563eb"/>
+  <text x="860" y="397" text-anchor="middle" font-size="13" font-weight="600" fill="#1f2937">S3  batch-views/</text>
+  <text x="860" y="415" text-anchor="middle" font-size="10.5" fill="#4b5563">aggregates (parquet)</text>
+  <text x="590" y="452" text-anchor="middle" font-size="10" font-style="italic" fill="#1e40af">EMR managed scaling · configured triggers</text>
+
+  <!-- ================= SERVING ================= -->
+  <rect x="470" y="512" width="180" height="60" rx="8" fill="#dcfce7" stroke="#16a34a"/>
+  <text x="560" y="536" text-anchor="middle" font-size="13" font-weight="600" fill="#1f2937">Amazon Athena</text>
+  <text x="560" y="554" text-anchor="middle" font-size="10.5" fill="#4b5563">SQL over batch-views/</text>
+
+  <rect x="690" y="500" width="250" height="84" rx="8" fill="#bbf7d0" stroke="#15803d" stroke-width="1.5"/>
+  <text x="815" y="530" text-anchor="middle" font-size="13" font-weight="700" fill="#14532d">Merged priority view</text>
+  <text x="815" y="550" text-anchor="middle" font-size="11" fill="#166534">"repeat offender</text>
+  <text x="815" y="566" text-anchor="middle" font-size="11" fill="#166534">AND spiking now"</text>
+
+  <rect x="980" y="512" width="180" height="60" rx="8" fill="#dcfce7" stroke="#16a34a"/>
+  <text x="1070" y="536" text-anchor="middle" font-size="13" font-weight="600" fill="#1f2937">Streamlit dashboard</text>
+  <text x="1070" y="554" text-anchor="middle" font-size="10.5" fill="#4b5563">live offenders + alerts</text>
+
+  <!-- ================= ARROWS ================= -->
+  <!-- logs -> producer -->
+  <path d="M115,202 L115,233" fill="none" stroke="#475569" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <!-- producer -> kinesis -->
+  <path d="M190,261 L228,247" fill="none" stroke="#475569" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text x="205" y="235" font-size="9.5" fill="#6b7280">replay</text>
+  <!-- kinesis -> lambda -->
+  <path d="M390,205 L466,162" fill="none" stroke="#475569" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <!-- lambda -> ddb -->
+  <path d="M660,160 L716,160" fill="none" stroke="#475569" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <!-- kinesis -> firehose -->
+  <path d="M390,240 L466,309" fill="none" stroke="#475569" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <!-- firehose -> s3raw -->
+  <path d="M630,311 L666,311" fill="none" stroke="#475569" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <!-- s3raw -> emr -->
+  <path d="M770,338 L594,370" fill="none" stroke="#475569" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <!-- emr -> s3bv -->
+  <path d="M710,405 L756,405" fill="none" stroke="#475569" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <!-- s3bv -> athena -->
+  <path d="M860,438 L564,510" fill="none" stroke="#475569" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <!-- athena -> merge -->
+  <path d="M650,542 L686,542" fill="none" stroke="#15803d" stroke-width="1.8" marker-end="url(#arrowGreen)"/>
+  <!-- ddb (speed) -> merge, routed along right margin -->
+  <path d="M920,160 L985,160 L985,492 L896,492" fill="none" stroke="#15803d" stroke-width="1.8" stroke-dasharray="4 3" marker-end="url(#arrowGreen)"/>
+  <text x="995" y="330" font-size="10" fill="#15803d" transform="rotate(90 995 330)">live speed view</text>
+  <!-- merge -> streamlit -->
+  <path d="M940,542 L976,542" fill="none" stroke="#15803d" stroke-width="1.8" marker-end="url(#arrowGreen)"/>
+
+  <!-- footer -->
+  <text x="600" y="678" text-anchor="middle" font-size="11" fill="#6b7280">Auto-scaling boundary: EMR managed scaling (configured triggers) · AWS Lambda concurrency (native, per shard)  —  windowing on producer_ts (processing time)</text>
+</svg>
