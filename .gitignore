@@ -1,0 +1,32 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# --- Secrets / credentials (never commit) ---
+.env
+*.pem
+*.key
+.aws/
+credentials
+
+# --- Data: keep fixtures/OpenSSH_2k.log, exclude the full 70MB log + archives ---
+SSH.tar.gz
+*.tar.gz
+OpenSSH.log
+fixtures/OpenSSH.log
+
+# --- macOS / editor ---
+.DS_Store
+.idea/
+*.swp
+
+# --- Spark / EMR local junk ---
+metastore_db/
+derby.log
+spark-warehouse/

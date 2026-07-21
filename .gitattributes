@@ -1,0 +1,3 @@
+* text=auto eol=lf
+*.log -text
+*.parquet binary

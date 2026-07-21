@@ -1,0 +1,8 @@
+# Local development dependencies (producer, dashboard, benchmark plotting).
+# PySpark is intentionally NOT here — the batch job runs on EMR (Spark preinstalled).
+# Uncomment pyspark only if you want to prototype the batch job on your laptop.
+boto3>=1.34
+streamlit>=1.36
+matplotlib>=3.8
+python-dotenv>=1.0
+# pyspark>=3.5   # optional: local batch prototyping only
