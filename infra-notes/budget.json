@@ -1,0 +1,6 @@
+{
+  "BudgetName": "scp-siem-monthly",
+  "BudgetLimit": { "Amount": "80", "Unit": "USD" },
+  "TimeUnit": "MONTHLY",
+  "BudgetType": "COST"
+}

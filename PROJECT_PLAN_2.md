@@ -3,7 +3,11 @@
 **Module:** MSc Cloud Computing — Scalable Cloud Programming (NCI)
 **Deliverable:** Python-based scalable real-time analytics system on a Lambda architecture (AWS)
 **Due:** 4 August 2026, 17:00 · **Team size:** 2 · **Weighting:** 50% of module
-**Primary dataset:** Loghub OpenSSH logs (locked) · **Last updated:** 18 Jul 2026
+**Primary dataset:** Loghub OpenSSH logs (locked) · **Region:** `us-east-1`
+**Last updated:** 23 Jul 2026
+
+> **Status at a glance:** M0 complete. M1 in progress — Kinesis + DynamoDB live, producer written
+> and validated locally. Next: send records to Kinesis, then the stub Lambda.
 
 ---
 
@@ -63,8 +67,33 @@ full-history reputation. The split is the point.
 > Lambda). matplotlib (or Sheets/Excel) is only a thin presentation layer for the *required*
 > benchmark graphs. Line-parsing the logs is `str.split()` / one regex — not preprocessing.
 
+> **No Terraform / IaC.** Scrapped deliberately (see decision log D2) in favour of disciplined
+> manual create/teardown via the AWS console.
+
 > Distinction discriminators covered: **sliding-window** speed layer, **auto-scaling with stated
 > triggers** (EMR managed scaling), **sequential-vs-parallel** batch benchmark + **speedup-vs-nodes**.
+
+---
+
+## 4b. Decision Log
+
+Decisions already made, with the reasoning. **Do not re-open these without team agreement** —
+they're recorded here so neither member (nor a fresh Claude session) relitigates settled ground.
+
+| # | Decision | Rationale | Date |
+|---|---|---|---|
+| D1 | **Region = `us-east-1`** (changed from the originally-planned `eu-west-1`) | Team decision; all resources now live here. Check the console region selector every session. | 22 Jul |
+| D2 | **No Terraform / IaC** | Not graded by the module rubric; the time cost isn't justified at this deadline. Replaced by disciplined manual start/stop + `infra-notes/` as the written register. | 20 Jul |
+| D3 | **Shared AWS account**, teammate given an IAM user | Single budget/meter, single set of resources, no cross-account complexity. Requires coordination before create/delete. | 22 Jul |
+| D4 | **Kinesis: provisioned, 1 shard** (not on-demand) | Cheaper, and the visible ~1,000 rec/s shard ceiling is exactly what Experiment 2 is designed to hit. On-demand would hide the knee. | 22 Jul |
+| D5 | **DynamoDB: on-demand billing** | Bursty, unpredictable write pattern; effectively free at this volume; no capacity planning. | 22 Jul |
+| D6 | **Bucketed windowing** (30s x 10) over exact timestamp lists | Far less state to hold; atomic `ADD` plays well with Kinesis at-least-once delivery. | 20 Jul |
+| D7 | **Window on processing time (`producer_ts`)**, not the log's own timestamp | Log lines carry Dec-2018 timestamps with no year. Avoids year-inference hacks. Stated in the report. | 20 Jul |
+| D8 | **`user` field = username only**; invalid-ness carried by `status` | One fact per field. Amends the original schema example. Consumers must tolerate null `user`/`port`. | 23 Jul |
+| D9 | **2k fixture committed to git**; full 70 MB log excluded | Small, immutable test fixture — travels with the code that consumes it, keeps validation reproducible on clone. | 21 Jul |
+| D10 | **`*.log -text` in `.gitattributes`** | Fixture is CRLF; preserving exact bytes avoids a silent parser corruption. | 21 Jul |
+| D11 | **AWS console over CLI** for resource creation | Deliberate learning choice — click-through builds the mental model CLI one-liners hide. | 23 Jul |
+| D12 | **Single canonical parser** (`producer/producer.py::parse_line`), reused by Spark + Lambda | Divergent parsers would let batch and speed layers silently disagree about the same event. | 23 Jul |
 
 ---
 
@@ -78,10 +107,10 @@ as a valid stream; a one-shot file read is not).
 ### 5.1 Getting the data
 
 ```bash
-# 2k-line sample for local parser/producer dev (commit to repo under fixtures/)
+# 2k-line sample for local parser/producer dev (committed at fixtures/OpenSSH_2k.log)
 curl -sL https://raw.githubusercontent.com/logpai/loghub/master/OpenSSH/OpenSSH_2k.log -o OpenSSH_2k.log
 
-# full log for S3 master dataset + benchmarks
+# full log for S3 master dataset + benchmarks (kept OUT of git)
 wget "https://zenodo.org/records/8196385/files/SSH.tar.gz?download=1" -O SSH.tar.gz
 tar -xzf SSH.tar.gz && ls -lh          # extracted log is typically OpenSSH.log
 
@@ -96,29 +125,51 @@ grep "Failed password" OpenSSH.log | grep -oE 'from [0-9.]+' | awk '{print $2}' 
 Michael R. Lyu. *Loghub: A Large Collection of System Log Datasets for AI-driven Log Analytics.*
 ISSRE 2023 (arXiv:2008.06448). Repo: github.com/logpai/loghub
 
-### 5.2 Record schema (LOCKED)
+### 5.2 Record schema (LOCKED — full detail in `CONTRACTS.md`)
 
 Producer parses each line into this JSON and pushes to Kinesis with **partition key = `source_ip`**
 (so one IP's events land on the same shard — natural for per-IP windowing):
 
 ```json
 {
-  "producer_ts": "2026-07-24T14:03:22.481Z",   // set at EMIT time; drives latency benchmark
+  "producer_ts": "2026-07-24T14:03:22.481Z",
   "source_ip": "52.80.34.196",
-  "status": "failed",                            // failed | accepted | invalid_user | other
-  "user": "invalid user test",
+  "status": "failed",
+  "user": "test",
   "port": 36034,
   "host": "LabSZ"
 }
 ```
 
+- `producer_ts` set at EMIT time; drives the latency benchmark.
+- `status` enum: `failed` | `accepted` | `invalid_user` | `other`.
+- `user` is the **username only** (D8) — invalid-ness lives in `status`.
+- **`user` and `port` are null on ~55% of records** (the `other` class). Consumers must tolerate it.
+
 > **Windowing note:** the log lines carry Dec-2018 timestamps with no year. We window on
 > **replay/arrival time (`producer_ts` / processing time)**, NOT the log's own timestamp. This keeps
 > the sliding-window logic clean and is stated explicitly in the report.
 
+### 5.3 Validated ground truth — 2k fixture
+
+The producer's parser reproduces these exactly; use as the regression anchor for the Spark job.
+
+| Metric | Value |
+|---|---|
+| Total lines | 1,999 |
+| `failed` | **520** |
+| `invalid_user` | 113 |
+| `accepted` | 1 |
+| `other` | 1,100 |
+| Dropped (no IP) | 265 |
+
+Top failed-auth IPs: `183.62.140.253` (286) · `187.141.143.180` (80) · `103.99.0.122` (46)
+
 ---
 
 ## 6. Architecture Flow
+
+Rendered diagram: **`report/architecture.svg`** (reused in the report + demo video).
 
 ```
  OpenSSH logs ──(paced replay, boto3)──► Kinesis Data Streams ──┬──► Lambda (speed layer)
@@ -155,54 +206,58 @@ iterator age over time, throughput vs offered load. Expect the knee near the sin
 ## 8. Milestone Tracker (comprehensive, dated)
 
 Working model: **paired on scheduled work-time calls** (no member split — ownership is shared).
-Target windows assume part-time evenings/weekends around study + work; slide them onto your actual
-call calendar. **DoD** = "definition of done" for the whole milestone. Tick tasks as you go.
+**DoD** = "definition of done" for the whole milestone.
 
-| Milestone | Focus | Target window |
-|---|---|---|
-| M0 | Foundation & contracts | Jul 18–20 |
-| M1 | Walking skeleton (retire EMR risk) | Jul 21–23 |
-| M2 | Build the two layers | Jul 24–28 |
-| M3 | Serving merge + dashboard | Jul 29–30 |
-| M4 | Auto-scaling + benchmarks | Jul 31 – Aug 1 |
-| M5 | Report + video + submit | Aug 2–3 |
-| — | **Buffer + submit** | **Aug 4 (by 17:00)** |
+| Milestone | Focus | Target window | Status |
+|---|---|---|---|
+| M0 | Foundation & contracts | Jul 18–20 | ✅ **Complete** |
+| M1 | Walking skeleton (retire EMR risk) | Jul 21–23 | 🔄 **In progress** |
+| M2 | Build the two layers | Jul 24–28 | ⬜ Not started |
+| M3 | Serving merge + dashboard | Jul 29–30 | ⬜ Not started |
+| M4 | Auto-scaling + benchmarks | Jul 31 – Aug 1 | ⬜ Not started |
+| M5 | Report + video + submit | Aug 2–3 | ⬜ Not started |
+| — | **Buffer + submit** | **Aug 4 (by 17:00)** | — |
 
 ---
 
-### M0 — Foundation & Contracts  ▢  (Jul 18–20)
-**DoD:** both members can build independently; nothing downstream is blocked.
+### M0 — Foundation & Contracts  ✅ **COMPLETE**  (Jul 18–20)
+**DoD:** both members can build independently; nothing downstream is blocked. — *met*
 
 *Repo & admin*
-- [ ] Create GitHub repo + folders: `producer/ speed/ batch/ serving/ dashboard/ benchmarks/ report/ infra-notes/ fixtures/`
-- [ ] Commit this plan + a README (project summary, run instructions stub)
-- [ ] Fill sign-up sheet row (team names + exact question in Short Description; check all rows for collisions)
-- [ ] Send one-line heads-up email to lecturer (replayed OpenSSH logs as the source)
+- [x] Create GitHub repo + folders: `producer/ speed/ batch/ serving/ dashboard/ benchmarks/ report/ infra-notes/ fixtures/`
+- [x] Commit this plan + a README (project summary, run instructions stub)
+- [x] Teammate added as GitHub collaborator; `TEAMMATE_ONBOARDING.md` written for context handoff
+- [ ] Fill sign-up sheet row (team names + exact question in Short Description; check all rows for collisions) — **STILL OPEN**
+- [ ] Send one-line heads-up email to lecturer (replayed OpenSSH logs as the source) — **STILL OPEN**
 
 *AWS guardrails*
-- [ ] Choose region (e.g. `eu-west-1` Ireland — low latency, cheap)
-- [ ] Create least-privilege IAM users/roles
-- [ ] **AWS Budgets alarm at $80** (+ early alert at $40); enable cost-allocation tags
-- [ ] Agree naming/tagging convention (e.g. prefix `scp-siem-*`, `Project` tag on everything)
+- [x] Region chosen: **`us-east-1`** (D1)
+- [x] Shared AWS account; IAM user created and shared with teammate (D3)
+- [x] **AWS Budget live:** `scp-siem-monthly`, $80 ceiling, email alerts at 50% ($40), 100% ($80), forecast-over-100%
+- [x] Naming/tagging convention agreed: prefix `scp-siem-*`, tag `Project=scp-siem` on everything
 
-*Contracts (the critical bit — everything builds against these)*
-- [ ] Finalise record schema (§5.2) and Kinesis partition key = `source_ip`
-- [ ] S3 layout: `raw/` (Firehose) + `batch-views/`, time-partitioned `yyyy/mm/dd/hh/`
-- [ ] DynamoDB speed-view table design (PK=`source_ip`, window-bucket attrs, `ttl` attribute)
-- [ ] Draw architecture diagram (draw.io/Excalidraw) — reused for Phase 1 + report + video
+*Contracts*
+- [x] Record schema finalised + Kinesis partition key = `source_ip` (`CONTRACTS.md`)
+- [x] S3 layout: `raw/` + `batch-views/` + `athena-results/`, time-partitioned `yyyy/mm/dd/hh/`
+- [x] DynamoDB speed-view table design (PK=`source_ip`, SK=`bucket`, `ttl` attribute)
+- [x] Architecture diagram -> `report/architecture.svg`
 
 *Data*
-- [ ] Download 2k sample -> `fixtures/`; download full `OpenSSH.log` (kept out of git — it's 70 MB)
-- [ ] Run the §5.1 sanity checks; note top-offender counts to ballpark the window threshold
+- [x] 2k sample committed -> `fixtures/OpenSSH_2k.log` (D9)
+- [x] Ground-truth counts captured for the 2k fixture (§5.3)
+- [ ] Download full `OpenSSH.log` + run §5.1 sanity checks on it — **carried into M2**
 
 ---
 
-### M1 — Walking Skeleton  ▢  (Jul 21–23)  *retire the risky unknowns early*
+### M1 — Walking Skeleton  🔄 **IN PROGRESS**  (Jul 21–23)  *retire the risky unknowns early*
 **DoD:** one record flows end-to-end on **both** paths; EMR bootstrap proven.
 
-- [ ] Create Kinesis stream (1 shard)
-- [ ] Minimal producer: read 2k sample, parse one line, `put_record` to Kinesis (fixed rate)
-- [ ] Stub Lambda (event source mapping from Kinesis): log + write raw record to DynamoDB; confirm one record visible
+- [x] Create Kinesis stream `scp-siem-stream` (1 shard, provisioned) — **ACTIVE**
+- [x] Create DynamoDB table `scp-siem-speed-state` (on-demand, TTL on `ttl` enabled) — **ACTIVE**
+- [x] Minimal producer written: parses fixture -> locked schema, `put_record` to Kinesis
+- [x] Parser validated against shell ground truth (520 failed = `grep -c`; top-3 IPs match)
+- [ ] 🔄 **CURRENT:** run producer against live Kinesis; confirm records in the Data viewer
+- [ ] Stub Lambda (event source mapping from Kinesis): log + write raw record to DynamoDB
 - [ ] Firehose -> S3: create delivery stream; confirm objects landing in `raw/`
 - [ ] **EMR de-risk:** launch small cluster (1 master + 1 core, m5.xlarge, spot core), run trivial PySpark "count rows from S3" job, confirm `spark-submit` works, **then tear the cluster down**
 - [ ] Save the exact IAM roles/policies/networking that worked -> `infra-notes/`
@@ -210,28 +265,30 @@ call calendar. **DoD** = "definition of done" for the whole milestone. Tick task
 
 ---
 
-### M2 — Build the Two Layers  ▢  (Jul 24–28)  *the biggest block*
+### M2 — Build the Two Layers  ⬜  (Jul 24–28)  *the biggest block*
 **DoD:** real speed layer + real batch layer each work in isolation, validated against the §5.1 shell-command ground truth.
 
 *Producer (harden)*
-- [ ] Full line-parser: handle `Failed password`, `Accepted password`, `invalid user`, `message repeated N times`, pam `authentication failure` lines -> schema
-- [ ] Rate control: configurable records/sec (token-bucket or paced sleep); add `producer_ts` at emit; CLI flags for rate + optional file loop (to sustain long benchmark runs)
+- [ ] Extend `parse_line()` coverage: `message repeated N times`, pam `authentication failure` lines
+- [ ] Rate control: configurable records/sec (token-bucket or paced sleep); CLI flags for rate + optional file loop (to sustain long benchmark runs)
+- [ ] Switch to `put_records` batching for the high-rate benchmark tiers
 
 *Speed layer (Lambda)*
-- [ ] Sliding-window failed-auth count per `source_ip` over trailing 5 min
-- [ ] Pick implementation: **bucketed** (30s buckets x10 — recommended, less state) vs exact (timestamp list, evict >5 min)
-- [ ] DynamoDB state table with TTL; write window counts; emit alert when threshold crossed
+- [ ] Sliding-window failed-auth count per `source_ip` over trailing 5 min (bucketed, D6)
+- [ ] DynamoDB state writes with TTL; emit alert when threshold crossed
+- [ ] **Set the alert threshold** off the full-log ground-truth offender counts
 - [ ] Handle Kinesis at-least-once semantics (idempotent updates)
 
 *Batch layer (Spark on EMR)*
-- [ ] PySpark job: per-IP failed/accepted counts, top-N offenders, status distribution, first/last-seen -> write batch view to S3 (parquet or csv), partitioned
-- [ ] Hadoop Streaming **MapReduce** variant of the core per-IP count (`mapper.py` / `reducer.py`) — for the seq-vs-parallel benchmark + Lecture 5
-- [ ] Validate Spark output against §5.1 ground truth (top offender IPs must match)
-- [ ] Configure **EMR managed scaling** (min/max core units + stated trigger, e.g. `YARNMemoryAvailablePercentage` / pending-container ratio, + cooldown)
+- [ ] PySpark job: per-IP failed/accepted counts, top-N offenders, status distribution, first/last-seen -> batch view to S3 (parquet or csv), partitioned
+- [ ] Hadoop Streaming **MapReduce** variant of the core per-IP count (`mapper.py` / `reducer.py`)
+- [ ] **Reuse `parse_line()`** rather than rewriting the parser (D12)
+- [ ] Validate Spark output against §5.1 / §5.3 ground truth (top offender IPs must match)
+- [ ] Configure **EMR managed scaling** (min/max core units + stated trigger + cooldown)
 
 ---
 
-### M3 — Serving Merge + Dashboard  ▢  (Jul 29–30)
+### M3 — Serving Merge + Dashboard  ⬜  (Jul 29–30)
 **DoD:** system behaves as one — merged priority view queryable and visualised.
 
 - [ ] Athena: external table(s) over the S3 batch view; test queries
@@ -241,12 +298,12 @@ call calendar. **DoD** = "definition of done" for the whole milestone. Tick task
 
 ---
 
-### M4 — Auto-scaling + Benchmarks  ▢  (Jul 31 – Aug 1)
+### M4 — Auto-scaling + Benchmarks  ⬜  (Jul 31 – Aug 1)
 **DoD:** both experiments run; raw metrics captured as CSV; figures generated; analysis notes drafted.
 
 *Experiment 1 — batch seq-vs-parallel*
 - [ ] Fix input size (full 655k; replicate xN into a larger master dataset if runtimes are too short to measure cleanly)
-- [ ] Runs: sequential Python / single-node MapReduce baseline; Spark on 1/3/5/7 core nodes; identical instance types; 3 runs each, warm-up discarded, median; time driver-side (Spark event log), exclude bootstrap
+- [ ] Runs: sequential Python / single-node MapReduce baseline; Spark on 1/3/5/7 core nodes; identical instance types; 3 runs each, warm-up discarded, median; time driver-side, exclude bootstrap
 - [ ] Metrics -> CSV in `benchmarks/`; compute speedup S(N)=T(1)/T(N) and efficiency S(N)/N
 
 *Experiment 2 — speed-layer latency under load*
@@ -261,11 +318,12 @@ call calendar. **DoD** = "definition of done" for the whole milestone. Tick task
 
 ---
 
-### M5 — Report + Video + Submit  ▢  (Aug 2–3)
+### M5 — Report + Video + Submit  ⬜  (Aug 2–3)
 **DoD:** all artifacts submitted before the deadline, with buffer.
 
 *Report (IEEE, 2-column, <= 10 pages)*
 - [ ] Sections: intro/objectives; problem & use-case justification (5-mark); architecture + tools; implementation (batch/speed/serving); performance results + graphs; critical analysis; conclusion
+- [ ] Embed `report/architecture.svg`
 - [ ] References incl. loghub citation (§5.1) + relevant lecture material
 - [ ] Cross-review both — one voice, no errors
 
@@ -282,13 +340,25 @@ call calendar. **DoD** = "definition of done" for the whole milestone. Tick task
 
 ## 9. Logistics & Guardrails
 
-**Cost control ($80 ceiling — personal AWS account):**
+**Cost control ($80 ceiling — shared personal AWS account):**
+- Budget alarm **live** since M0: `scp-siem-monthly`, alerts at $40 / $80 / forecast-over-$80.
 - Tear down the **EMR cluster** whenever not actively benchmarking (biggest line item).
 - **Never create a NAT gateway** — keep EMR/EC2 in a public subnet or use VPC endpoints.
-- Kinesis at **1 shard** baseline; scale up only during benchmark runs.
-- Spot instances for EMR core nodes. Budget alarm live from M0. Realistic total: **$30–50**.
+- Kinesis at **1 shard** baseline; scale up only during benchmark runs, then back down.
+- Spot instances for EMR core nodes. Realistic total: **$30–50**.
+- Kinesis (~$0.36/day) + DynamoDB (on-demand) are cheap enough to leave running M1–M4.
+
+**Shared-account coordination (D3):** resource names are unique per account+region — check
+`infra-notes/resources.md` before creating anything, never tear down what you didn't create
+(especially EMR mid-run), and prefix experiments with your initials.
+
+**Live resources:** see `infra-notes/resources.md` — the register of what exists.
 
 **Submission checklist:** IEEE PDF report to Moodle · GitHub link in report · video link (OneDrive/YouTube) in report.
 
 **Key risk:** first-time EMR bootstrap / spark-submit is the usual time-sink. The M1 walking
 skeleton exists to kill that risk before it can touch the critical path.
+
+**Second risk (new):** M1 is running to the end of its window with the EMR de-risk not yet
+started. If it slips past Jul 24, it eats into M2 — the biggest block. Prioritise the EMR
+task over polish on the producer.
