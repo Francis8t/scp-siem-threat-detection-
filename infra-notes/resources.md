@@ -8,3 +8,10 @@
 Teardown at end of project (console: delete via each service, or CLI):
   aws kinesis delete-stream --stream-name scp-siem-stream
   aws dynamodb delete-table --table-name scp-siem-speed-state
+
+
+  s3-bucket-name: scp-siem-data-009910375264
+
+  the Firehose stream: scp-siem-firehose 
+
+  Firehose IAM role name: KinesisFirehoseServiceRole-scp-siem-fire-us-east-1-1784818029868
