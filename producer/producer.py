@@ -99,7 +99,7 @@ def main():
             else:
                 client.put_record(
                     StreamName=STREAM_NAME,
-                    Data=json.dumps(rec).encode("utf-8"),
+                    Data=(json.dumps(rec) + "\n").encode("utf-8"),
                     PartitionKey=rec["source_ip"],      # locked: PK = source_ip
                 )
                 print(f"sent {rec['status']:<13} {rec['source_ip']}")
