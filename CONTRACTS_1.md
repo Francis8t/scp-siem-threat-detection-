@@ -4,7 +4,7 @@ Everything downstream builds against these. Producer, speed layer, batch layer, 
 agree on these exact field names. Change only by team agreement — and when one changes, update
 `report/architecture.svg` and `TEAMMATE_ONBOARDING.md` in the same commit.
 
-**Region: `us-east-1`** · **Last updated:** 23 Jul 2026
+**Region: `us-east-1`** · **Last updated:** 23 Jul 2026 (post-M1)
 
 ---
 
@@ -110,8 +110,22 @@ Bucket: `scp-siem-data-<ACCOUNT_ID>` (region `us-east-1`)
     batch-views/                <- Spark batch aggregates (parquet or csv), partitioned
     athena-results/             <- Athena query output location
 
+Bucket in use: `scp-siem-data-009910375264`
+
 `raw/` is the append-only source of truth for the batch layer. Batch jobs **read** `raw/`, never
 mutate it, and write only under `batch-views/`.
+
+### Two properties of `raw/` that every reader must handle
+
+**1. Records are newline-delimited JSON.** Firehose concatenates record payloads with no
+delimiter, so the producer appends `\n` to each Kinesis payload. Without it, S3 objects are one
+unparseable run-on blob. Consumers can rely on one JSON object per line.
+
+**2. Spark must be told to recurse.** Firehose writes into nested `raw/yyyy/MM/dd/HH/`
+directories, and `spark.read.json()` does **not** descend into subdirectories by default —
+pointing it at `raw/` yields `UNABLE_TO_INFER_SCHEMA`. Every job that reads `raw/` needs:
+
+    df = spark.read.option("recursiveFileLookup", "true").json("s3://<bucket>/raw/")
 
 ---
 

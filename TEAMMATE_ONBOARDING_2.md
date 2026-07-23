@@ -4,7 +4,7 @@
 project — what it is, what's been decided and *why*, what's already built, and what happens next.
 It is self-contained: everything needed to contribute is below.
 
-**Last updated:** 23 July 2026 (M1 in progress) · **Deadline:** 4 August 2026, 17:00
+**Last updated:** 23 July 2026 (M0 + M1 complete) · **Deadline:** 4 August 2026, 17:00
 
 ---
 
@@ -169,6 +169,14 @@ Two irregularities already found and handled:
   comes out 519 instead of 520. All patterns use `\s+`. Expect more of this in the full 655k log —
   always validate against the shell ground truth rather than trusting the parser.
 
+Two more that will bite you when reading `raw/` from S3:
+
+- **Newline delimiting.** Firehose concatenates payloads with no delimiter, so the producer
+  appends `\n` to each record. Don't remove it — without it, S3 objects are unparseable.
+- **Spark directory recursion.** Firehose writes to `raw/yyyy/MM/dd/HH/`, and `spark.read.json()`
+  does not descend into subdirectories by default. Every job reading `raw/` needs
+  `.option("recursiveFileLookup", "true")` or it fails with `UNABLE_TO_INFER_SCHEMA`.
+
 ### 4.4 Validated ground truth — 2k fixture
 
 The parser reproduces these exactly. **Use as the regression anchor for the Spark batch job.**
@@ -276,31 +284,32 @@ Spark is preinstalled.
 - Contracts locked and committed (`CONTRACTS.md`)
 - Architecture diagram produced → `report/architecture.svg` (reused in report + demo video)
 
-### 🔄 M1 — Walking skeleton (IN PROGRESS)
-The goal of M1 is to **retire the risky unknowns early** — one record flowing end-to-end on
-both paths, and EMR proven to bootstrap.
+### ✅ M1 — Walking skeleton (COMPLETE, on schedule)
+The goal of M1 was to **retire the risky unknowns early**. Both paths now work end-to-end and
+the EMR risk is gone.
 
-- ✅ **Step 6 — DONE.** Kinesis stream `scp-siem-stream` (1 shard, provisioned) is **Active**;
-  DynamoDB table `scp-siem-speed-state` (on-demand) is **Active** with TTL **On**. Both created
-  via the **AWS console** rather than CLI, deliberately, for learning value.
-- 🔄 **Step 7 (current) — producer.** `producer/producer.py` is written and its parser is
-  validated against shell ground truth (520 `failed` records = `grep -c "Failed password"`;
-  top-3 offender IPs match exactly). Remaining: run it against live Kinesis and confirm records
-  appear in the Kinesis console's **Data viewer** tab.
-- ⬜ Step 8 — stub Lambda (Kinesis event source mapping): log + write a raw record to DynamoDB
-- ⬜ Step 9 — Firehose → S3: confirm objects landing in `raw/`
-- ⬜ Step 10 — **EMR de-risk**: launch a small cluster (1 master + 1 core, m5.xlarge, spot core),
-  run a trivial PySpark "count rows from S3" job, confirm `spark-submit` works, **tear it down**
+- ✅ Kinesis `scp-siem-stream` + DynamoDB `scp-siem-speed-state` live (created via console)
+- ✅ Producer `producer/producer.py` — parser validated against shell ground truth (520 failed)
+- ✅ Speed Lambda `scp-siem-speed` — Kinesis trigger → 30s-bucketed counts in DynamoDB, verified
+      exactly against the fixture. Memory raised to 256 MB before benchmarking.
+- ✅ Firehose `scp-siem-firehose` → S3 `raw/`, newline-delimited JSON
+- ✅ **EMR de-risk PASSED** — emr-7.13.0 / Spark 3.5.6, `spark-submit` via console Step, read
+      `s3://.../raw/`, groupBy shuffle completed, output reconciled exactly to the fixture
+      (200 records: 119 other / 62 failed / 19 invalid_user). Cluster terminated.
 
-> **Biggest risk on the project:** first-time EMR bootstrap / `spark-submit` is the classic
-> time-sink. The M1 walking skeleton exists purely to kill that risk before it can touch the
-> critical path. If EMR isn't running by end of M1, pair on it hard — don't let it bleed into M2.
+**Round-trip integrity proven:** producer → Kinesis → Firehose → S3 → Spark preserves every
+record and field. The locked schema survives intact.
+
+> **Read `infra-notes/resources.md` §4 before you touch EMR.** The first cluster took ~1 hour,
+> almost entirely on four config failures: the EC2 Spot service-linked role, the instance-profile
+> S3 policy, the step's Application-location field, and Spark's directory recursion. All four are
+> documented with exact fixes. Rebuilding should now take minutes.
 
 ### ⬜ Ahead — M2 to M5
 
 | Milestone | Focus | Target |
 |---|---|---|
-| **M2** | Build the two layers for real — hardened producer (full line-parser + rate control), sliding-window Lambda, PySpark batch job + MapReduce variant, EMR managed scaling configured. Validate Spark output against the shell-command ground truth. *Biggest block.* | Jul 24–28 |
+| **M2** ⬅ **NEXT** | Build the two layers for real — hardened producer (full line-parser + rate control), sliding-window Lambda, PySpark batch job + MapReduce variant, EMR managed scaling configured. Validate Spark output against the shell-command ground truth. *Biggest block.* | Jul 24–28 |
 | **M3** | Serving merge + Streamlit dashboard; end-to-end smoke test | Jul 29–30 |
 | **M4** | Both benchmark experiments; capture CSVs, generate figures, draft analysis; **tear everything down after** | Jul 31 – Aug 1 |
 | **M5** | IEEE report (≤10 pages, 2-column), demo video, submit | Aug 2–3 |

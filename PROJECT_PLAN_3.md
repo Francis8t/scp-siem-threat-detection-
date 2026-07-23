@@ -4,10 +4,11 @@
 **Deliverable:** Python-based scalable real-time analytics system on a Lambda architecture (AWS)
 **Due:** 4 August 2026, 17:00 · **Team size:** 2 · **Weighting:** 50% of module
 **Primary dataset:** Loghub OpenSSH logs (locked) · **Region:** `us-east-1`
-**Last updated:** 23 Jul 2026
+**Last updated:** 23 Jul 2026 (M1 complete)
 
-> **Status at a glance:** M0 complete. M1 in progress — Kinesis + DynamoDB live, producer written
-> and validated locally. Next: send records to Kinesis, then the stub Lambda.
+> **Status at a glance:** M0 and M1 both complete. Full pipeline proven end-to-end on both paths
+> (Kinesis → Lambda → DynamoDB, and Kinesis → Firehose → S3 → Spark on EMR). EMR risk retired.
+> **Next: M2 — build the real speed and batch layers.**
 
 ---
 
@@ -94,6 +95,10 @@ they're recorded here so neither member (nor a fresh Claude session) relitigates
 | D10 | **`*.log -text` in `.gitattributes`** | Fixture is CRLF; preserving exact bytes avoids a silent parser corruption. | 21 Jul |
 | D11 | **AWS console over CLI** for resource creation | Deliberate learning choice — click-through builds the mental model CLI one-liners hide. | 23 Jul |
 | D12 | **Single canonical parser** (`producer/producer.py::parse_line`), reused by Spark + Lambda | Divergent parsers would let batch and speed layers silently disagree about the same event. | 23 Jul |
+| D13 | **Newline-delimit Kinesis payloads** (`json.dumps(rec) + "\n"`) | Firehose concatenates records with no delimiter — without this, S3 objects are unparseable by Spark. Lambda is unaffected. | 23 Jul |
+| D14 | **Lambda memory 256 MB** (up from 128 MB) | 128 MB ran at ~73% utilisation; Lambda scales CPU with memory, so this roughly halves `Duration`. Fixed *before* benchmarks so Experiment 2 numbers are stable. | 23 Jul |
+| D15 | **`recursiveFileLookup=true` on every read of `raw/`** | Spark doesn't recurse into Firehose's nested `yyyy/MM/dd/HH/` dirs by default; without it, `UNABLE_TO_INFER_SCHEMA`. | 23 Jul |
+| D16 | **EMR submitted via console Steps** (Deploy mode = Client) | Client mode puts driver stdout in the step log where it's readable. `command-runner.jar` is the fallback when console fields misbehave. | 23 Jul |
 
 ---
 
@@ -211,8 +216,8 @@ Working model: **paired on scheduled work-time calls** (no member split — owne
 | Milestone | Focus | Target window | Status |
 |---|---|---|---|
 | M0 | Foundation & contracts | Jul 18–20 | ✅ **Complete** |
-| M1 | Walking skeleton (retire EMR risk) | Jul 21–23 | 🔄 **In progress** |
-| M2 | Build the two layers | Jul 24–28 | ⬜ Not started |
+| M1 | Walking skeleton (retire EMR risk) | Jul 21–23 | ✅ **Complete** |
+| M2 | Build the two layers | Jul 24–28 | 🔄 **Next** |
 | M3 | Serving merge + dashboard | Jul 29–30 | ⬜ Not started |
 | M4 | Auto-scaling + benchmarks | Jul 31 – Aug 1 | ⬜ Not started |
 | M5 | Report + video + submit | Aug 2–3 | ⬜ Not started |
@@ -249,19 +254,28 @@ Working model: **paired on scheduled work-time calls** (no member split — owne
 
 ---
 
-### M1 — Walking Skeleton  🔄 **IN PROGRESS**  (Jul 21–23)  *retire the risky unknowns early*
-**DoD:** one record flows end-to-end on **both** paths; EMR bootstrap proven.
+### M1 — Walking Skeleton  ✅ **COMPLETE**  (Jul 21–23)  *risky unknowns retired*
+**DoD:** one record flows end-to-end on **both** paths; EMR bootstrap proven. — *met, on schedule*
 
-- [x] Create Kinesis stream `scp-siem-stream` (1 shard, provisioned) — **ACTIVE**
-- [x] Create DynamoDB table `scp-siem-speed-state` (on-demand, TTL on `ttl` enabled) — **ACTIVE**
-- [x] Minimal producer written: parses fixture -> locked schema, `put_record` to Kinesis
+- [x] Create Kinesis stream `scp-siem-stream` (1 shard, provisioned) — ACTIVE
+- [x] Create DynamoDB table `scp-siem-speed-state` (on-demand, TTL on `ttl`) — ACTIVE
+- [x] Minimal producer: parses fixture -> locked schema, `put_record` to Kinesis
 - [x] Parser validated against shell ground truth (520 failed = `grep -c`; top-3 IPs match)
-- [ ] 🔄 **CURRENT:** run producer against live Kinesis; confirm records in the Data viewer
-- [ ] Stub Lambda (event source mapping from Kinesis): log + write raw record to DynamoDB
-- [ ] Firehose -> S3: create delivery stream; confirm objects landing in `raw/`
-- [ ] **EMR de-risk:** launch small cluster (1 master + 1 core, m5.xlarge, spot core), run trivial PySpark "count rows from S3" job, confirm `spark-submit` works, **then tear the cluster down**
-- [ ] Save the exact IAM roles/policies/networking that worked -> `infra-notes/`
-- [ ] **Checkpoint:** if EMR isn't running by end of M1, pair on it hard — don't let it bleed into M2
+- [x] Producer run against live Kinesis; records confirmed in the Data viewer
+- [x] Speed Lambda `scp-siem-speed`: Kinesis event source mapping -> 30s-bucketed counts in DynamoDB
+- [x] Lambda output verified (5 IPs / 15 failed for `--limit 50`) — **exact match to fixture**
+- [x] Lambda memory raised to 256 MB (D14)
+- [x] S3 bucket `scp-siem-data-009910375264` created
+- [x] Firehose `scp-siem-firehose` -> S3 `raw/`; objects confirmed, newline-delimited (D13)
+- [x] **EMR de-risk PASSED:** emr-7.13.0 / Spark 3.5.6, 1 primary + 1 core m5.xlarge, `spark-submit` via console Step, read `s3://.../raw/`, groupBy shuffle completed
+- [x] EMR output reconciled exactly against fixture (200 records: 119 other / 62 failed / 19 invalid_user; top-3 IPs match)
+- [x] Cluster terminated
+- [x] IAM roles/policies + the four EMR failure modes documented -> `infra-notes/resources.md`
+
+**Round-trip integrity proven:** producer → Kinesis → Firehose → S3 → Spark preserves every
+record and field with zero loss or corruption. The `CONTRACTS.md` schema survives intact.
+
+**Cost so far:** well inside budget. EMR de-risk run ≈ $0.35.
 
 ---
 
@@ -359,6 +373,11 @@ Working model: **paired on scheduled work-time calls** (no member split — owne
 **Key risk:** first-time EMR bootstrap / spark-submit is the usual time-sink. The M1 walking
 skeleton exists to kill that risk before it can touch the critical path.
 
-**Second risk (new):** M1 is running to the end of its window with the EMR de-risk not yet
-started. If it slips past Jul 24, it eats into M2 — the biggest block. Prioritise the EMR
-task over polish on the producer.
+**Key risk — RETIRED (23 Jul).** EMR bootstrap and `spark-submit` are proven working, and the
+four failure modes hit during the de-risk are documented with fixes in
+`infra-notes/resources.md` §4. Cluster relaunch at M2/M4 should be minutes, not hours.
+
+**Current top risk:** M2 is the largest block (speed layer + batch layer + MapReduce variant +
+managed scaling) in a 5-day window. The MapReduce variant and EMR managed-scaling config are the
+two items most likely to be squeezed — and both are distinction discriminators. Do not let them
+slide into M4.
