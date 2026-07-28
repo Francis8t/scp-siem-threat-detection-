@@ -4,7 +4,7 @@
 project — what it is, what's been decided and *why*, what's already built, and what happens next.
 It is self-contained: everything needed to contribute is below.
 
-**Last updated:** 23 July 2026 (M0 + M1 complete) · **Deadline:** 4 August 2026, 17:00
+**Last updated:** 28 July 2026 (M2 — producer + speed layer done) · **Deadline:** 4 August 2026, 17:00
 
 ---
 
@@ -168,6 +168,12 @@ Two irregularities already found and handled:
   with a **double space**. A regex assuming single spaces misclassifies it and the failed-count
   comes out 519 instead of 520. All patterns use `\s+`. Expect more of this in the full 655k log —
   always validate against the shell ground truth rather than trusting the parser.
+- **Option-A skip (M2 / D17).** `parse_line()` now explicitly drops `message repeated N times`
+  and PAM `authentication failure` lines via `RE_SKIP`. Deliberate stated undercount — the
+  streaming pipeline is what's graded, not parsing completeness. This is why the skip-applied
+  fixture `failed` count is **518, not 520** (see 4.4), and why `grep -c "Failed password"` on
+  the full log (197,587) exceeds the parser's failed count (160,616): grep counts the repeat
+  lines the parser skips.
 
 Two more that will bite you when reading `raw/` from S3:
 
@@ -179,20 +185,26 @@ Two more that will bite you when reading `raw/` from S3:
 
 ### 4.4 Validated ground truth — 2k fixture
 
-The parser reproduces these exactly. **Use as the regression anchor for the Spark batch job.**
+**Reconcile the Spark job to the skip-applied column** (it reuses the skipping parser).
 
-| Metric | Value |
-|---|---|
-| Total lines | 1,999 |
-| `failed` | **520** |
-| `invalid_user` | 113 |
-| `accepted` | 1 |
-| `other` | 1,100 |
-| Dropped (no IP) | 265 |
+| Metric | M1 (raw) | M2 (skip applied) |
+|---|---|---|
+| Total lines | 1,999 | 1,999 |
+| `failed` | 520 | **518** |
+| `invalid_user` | 113 | 113 |
+| `accepted` | 1 | 1 |
+| `other` | 1,100 | **601** |
+| Dropped | 265 | **767** |
 
-Top failed-auth IPs: `183.62.140.253` (286) · `187.141.143.180` (80) · `103.99.0.122` (46)
+Top failed-auth IPs (unchanged): `183.62.140.253` (286) · `187.141.143.180` (80) ·
+`103.99.0.122` (46). **These three fired the alerts in the live speed-layer test** — nice
+end-to-end confirmation.
 
-Cross-check: `grep -c "Failed password" fixtures/OpenSSH_2k.log`
+**Full log (skip applied):** 160,616 `failed` events; worst single 5-min window = **157**
+(`183.63.110.206`); attacker peak band **126–157** → basis for threshold 50 (D18).
+
+Cross-check: `grep -c "Failed password" fixtures/OpenSSH_2k.log` (returns more than the parser —
+that gap is the D17 skip, not a bug).
 
 ### 4.5 S3 layout
 
@@ -220,6 +232,16 @@ timestamp-list approach because it holds far less state.
 
 Note: DynamoDB TTL deletes within ~48h of expiry, not on the dot. Harmless — the speed layer
 only ever sums the trailing 10 buckets, so stale items never affect a count. TTL is housekeeping.
+
+**Alerts (M2 / D18 + D19):** threshold = **50** failed/IP/5-min. Alerts live in the *same* table:
+`kind="alert"`, synthetic `bucket = 10_000_000_000 + window_start` (sorts clear of state rows),
+plus `window_start`, `window_count`, `first_seen_ts`, `ttl = window_start + 3600`. Written via an
+**idempotent conditional put** (`attribute_not_exists(source_ip)`) → exactly one alert per IP per
+window, even under Kinesis redelivery. The *count* still double-counts on redelivery (D6); the
+*alert* doesn't.
+
+**IAM:** the speed Lambda role needed `dynamodb:Query` + `dynamodb:PutItem` added in M2 (M1 had
+only `UpdateItem`). If the window query throws `AccessDeniedException`, that's the missing grant.
 
 ---
 
@@ -305,11 +327,34 @@ record and field. The locked schema survives intact.
 > S3 policy, the step's Application-location field, and Spark's directory recursion. All four are
 > documented with exact fixes. Rebuilding should now take minutes.
 
-### ⬜ Ahead — M2 to M5
+### 🔄 M2 — producer + speed layer DONE (28 Jul); batch layer next
+
+**Producer (`producer/producer.py`) — done, verified live in Kinesis.** Option-A skip; `--rate`,
+`--loop`, `--batch-size` (put_records, capped 500, retry-once), `--limit 0`=unlimited. Live send
+decoded off the shard: correct schema, nulls, `\n` delimiter, `source_ip` partition key.
+
+Run it:
+```bash
+# parse-only, no AWS
+python3 producer/producer.py --file fixtures/OpenSSH_2k.log --limit 50 --dry-run
+# live, paced 200/s, 2000 records (crosses the alert threshold for hot IPs)
+python3 producer/producer.py --file SSH.log --rate 200 --limit 2000
+```
+
+**Speed layer (`speed/lambda_function.py`) — done, alerts verified in DynamoDB.** Trailing-10-bucket
+window sum; threshold 50; idempotent per-IP-per-window alerts. Verified locally with `moto`
+(window sum, crossing, filtering, redelivery-idempotency) *and* live — the three fixture
+top-offender IPs fired alert rows. Env var `ALERT_THRESHOLD=50` set on the function.
+
+**Batch layer — the remaining M2 block.** Build the PySpark job against local `SSH.log` first
+(no EMR cost), reconcile to the skip-applied ground truth, *then* point it at `s3://.../raw/`
+with `recursiveFileLookup=true`. Then the Hadoop Streaming MapReduce variant + EMR managed scaling.
+
+### ⬜ Ahead — rest of M2 to M5
 
 | Milestone | Focus | Target |
 |---|---|---|
-| **M2** ⬅ **NEXT** | Build the two layers for real — hardened producer (full line-parser + rate control), sliding-window Lambda, PySpark batch job + MapReduce variant, EMR managed scaling configured. Validate Spark output against the shell-command ground truth. *Biggest block.* | Jul 24–28 |
+| **M2** (finishing) | Batch layer: PySpark job + MapReduce variant + EMR managed scaling. Validate against ground truth. | Jul 28–29 |
 | **M3** | Serving merge + Streamlit dashboard; end-to-end smoke test | Jul 29–30 |
 | **M4** | Both benchmark experiments; capture CSVs, generate figures, draft analysis; **tear everything down after** | Jul 31 – Aug 1 |
 | **M5** | IEEE report (≤10 pages, 2-column), demo video, submit | Aug 2–3 |

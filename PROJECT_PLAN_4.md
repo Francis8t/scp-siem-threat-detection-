@@ -4,11 +4,15 @@
 **Deliverable:** Python-based scalable real-time analytics system on a Lambda architecture (AWS)
 **Due:** 4 August 2026, 17:00 · **Team size:** 2 · **Weighting:** 50% of module
 **Primary dataset:** Loghub OpenSSH logs (locked) · **Region:** `us-east-1`
-**Last updated:** 23 Jul 2026 (M1 complete)
+**Last updated:** 28 Jul 2026 (M2 in progress — producer + speed layer done)
 
-> **Status at a glance:** M0 and M1 both complete. Full pipeline proven end-to-end on both paths
-> (Kinesis → Lambda → DynamoDB, and Kinesis → Firehose → S3 → Spark on EMR). EMR risk retired.
-> **Next: M2 — build the real speed and batch layers.**
+> **Status at a glance:** M0 and M1 complete. M2 **producer hardening** and the **real speed
+> layer** are done and verified live: the hardened producer (rate control + `put_records`
+> batching + loop + Option-A skip) lands correct records in Kinesis, and the sliding-window
+> Lambda fires exactly-one-per-IP-per-window alerts at threshold 50 — confirmed in DynamoDB
+> against the three top-offender fixture IPs (183.62.140.253, 187.141.143.180, 103.99.0.122).
+> **Next in M2: the batch layer — PySpark job + Hadoop Streaming MapReduce variant + EMR
+> managed scaling.**
 
 ---
 
@@ -99,6 +103,9 @@ they're recorded here so neither member (nor a fresh Claude session) relitigates
 | D14 | **Lambda memory 256 MB** (up from 128 MB) | 128 MB ran at ~73% utilisation; Lambda scales CPU with memory, so this roughly halves `Duration`. Fixed *before* benchmarks so Experiment 2 numbers are stable. | 23 Jul |
 | D15 | **`recursiveFileLookup=true` on every read of `raw/`** | Spark doesn't recurse into Firehose's nested `yyyy/MM/dd/HH/` dirs by default; without it, `UNABLE_TO_INFER_SCHEMA`. | 23 Jul |
 | D16 | **EMR submitted via console Steps** (Deploy mode = Client) | Client mode puts driver stdout in the step log where it's readable. `command-runner.jar` is the fallback when console fields misbehave. | 23 Jul |
+| D17 | **Option A — skip `message repeated N times` + PAM `authentication failure` lines** in the producer | Streaming project; underlying-data completeness is not the evaluation criterion. Repeat lines (~37k, each = N failures) and PAM lines (~231k, a duplicate view of the same failures + hostname `rhost=` values that violate the dotted-quad `source_ip` contract) are dropped. Accepted as a **deliberate, stated undercount** in the report. Emitting PAM would *double-count* every failure. | 28 Jul |
+| D18 | **Alert threshold = 50 failed auths / IP / 5-min window** | Evidence-based, not a guess. Full-log analysis (skip applied) shows confirmed brute-forcers peak at **126–157** failures in a single 5-min window, tightly banded; legitimate users produce single digits. 50 sits ~10x above legitimate behaviour and below the attacker band, so zero false negatives on real threats and near-zero false positives. 50 (vs 100) chosen for a more sensitive, faster-firing live demo. | 28 Jul |
+| D19 | **Alerts stored in the same DynamoDB state table**, distinguished by `kind="alert"` + a synthetic `bucket ≥ 10_000_000_000` (= `10e9 + window_start`); written via an **idempotent conditional put** | No second table, no extra IAM. Synthetic bucket sorts alert rows clear of state rows so they never fall inside a `[lo,hi]` window query. Conditional `attribute_not_exists` put = exactly one alert per IP per window, even under Kinesis at-least-once redelivery. Note: the *count* still double-counts on redelivery (D6 tradeoff); the *alert* does not. | 28 Jul |
 
 ---
 
@@ -169,6 +176,37 @@ The producer's parser reproduces these exactly; use as the regression anchor for
 | Dropped (no IP) | 265 |
 
 Top failed-auth IPs: `183.62.140.253` (286) · `187.141.143.180` (80) · `103.99.0.122` (46)
+
+> **Updated under Option-A skip (D17):** the numbers above are the original M1 parser (and
+> `grep -c`, which also counts the skipped repeat lines). With the skip applied, the fixture
+> `failed` count is **518** (2 embedded-repeat failures dropped), `other` is **601**, and dropped
+> is **767**. The batch job should reconcile to the *skip-applied* numbers, not the raw grep.
+
+### 5.4 Full-log ground truth (skip applied) — the alert-threshold basis
+
+Computed with the canonical `parse_line()` + Option-A skip over the full 655,146-line `SSH.log`:
+
+| Metric | Value |
+|---|---|
+| Total lines | 655,146 |
+| `failed` events (skip applied) | **160,616** |
+| Distinct (IP, 5-min window) pairs | 7,026 |
+| **Worst single 5-min window** | **157** (`183.63.110.206`, a Jan-03 burst) |
+| Top-IP peak-window band | **126–157** (tightly clustered) |
+
+Raw `grep -c "Failed password"` on the full log returns **197,587** — higher than 160,616
+because grep counts the ~37k `message repeated` lines the producer skips. This gap is expected
+and is the D17 undercount, stated in the report.
+
+> The 126–157 band is the justification for the **threshold = 50** decision (D18): well below any
+> real attacker's peak (no false negatives), well above any legitimate user's 5-min failures
+> (near-zero false positives).
+
+**Data-quality note for the report:** the busiest windows are nearly all `183.63.110.206` on
+"Jan 03". The log nominally spans Dec 2018 but crosses into Jan 2019 with **no year field** — the
+exact reason we window on `producer_ts`, not the log clock (D7). The threshold analysis pins a
+nominal year only to get *relative* 5-min bucketing; absolute dates are irrelevant to the max-burst
+figure.
 
 ---
 
@@ -282,23 +320,33 @@ record and field with zero loss or corruption. The `CONTRACTS.md` schema survive
 ### M2 — Build the Two Layers  ⬜  (Jul 24–28)  *the biggest block*
 **DoD:** real speed layer + real batch layer each work in isolation, validated against the §5.1 shell-command ground truth.
 
-*Producer (harden)*
-- [ ] Extend `parse_line()` coverage: `message repeated N times`, pam `authentication failure` lines
-- [ ] Rate control: configurable records/sec (token-bucket or paced sleep); CLI flags for rate + optional file loop (to sustain long benchmark runs)
-- [ ] Switch to `put_records` batching for the high-rate benchmark tiers
+*Producer (harden)* — ✅ **DONE (28 Jul), verified live in Kinesis**
+- [x] Option A (D17): explicitly **skip** `message repeated N times` + PAM `authentication failure` lines via `RE_SKIP` (rather than let them fall through to `status:other`)
+- [x] Rate control: `--rate` records/sec (paced per 1s window); `--loop` to repeat the file for sustained benchmark runs
+- [x] `put_records` batching (`--batch-size`, capped at Kinesis' 500) so the 2.5k–5k rec/s tiers are actually reachable; failed-record retry-once
+- [x] `--limit 0` = unlimited (M1 default of 10 was a benchmarking footgun)
+- [x] Parser re-validated against the 2k fixture under skip: failed 520→**518**, other 1,100→**601**, dropped 265→**767** (see CONTRACTS §3)
+- [x] Live send confirmed: records decoded from the shard show correct schema, nulls, `\n` delimiter, and `source_ip` partition key
 
-*Speed layer (Lambda)*
-- [ ] Sliding-window failed-auth count per `source_ip` over trailing 5 min (bucketed, D6)
-- [ ] DynamoDB state writes with TTL; emit alert when threshold crossed
-- [ ] **Set the alert threshold** off the full-log ground-truth offender counts
-- [ ] Handle Kinesis at-least-once semantics (idempotent updates)
+*Speed layer (Lambda)* — ✅ **DONE (28 Jul), alerts verified in DynamoDB**
+- [x] Trailing-10-bucket (5-min) window sum per `source_ip` via a bounded `Query` over `[newest-270s, newest]`
+- [x] DynamoDB state writes with TTL (unchanged from M1); alert emitted when window sum ≥ threshold
+- [x] **Alert threshold set to 50** off full-log ground truth (D18; attacker band 126–157)
+- [x] Kinesis at-least-once handled: atomic `ADD` for counts (D6) + **idempotent conditional-put alert** (D19) → exactly one alert per IP per window under redelivery
+- [x] Locally tested with `moto` (mock DynamoDB): window sum, threshold crossing, status filtering, and redelivery-idempotency all pass before deploy
+- [x] IAM role widened: added `dynamodb:Query` + `dynamodb:PutItem` (M1 had only `UpdateItem`) — record in `infra-notes/resources.md`
 
-*Batch layer (Spark on EMR)*
+*Batch layer (Spark on EMR)* — ⬅ **NEXT, the remaining M2 block**
 - [ ] PySpark job: per-IP failed/accepted counts, top-N offenders, status distribution, first/last-seen -> batch view to S3 (parquet or csv), partitioned
 - [ ] Hadoop Streaming **MapReduce** variant of the core per-IP count (`mapper.py` / `reducer.py`)
 - [ ] **Reuse `parse_line()`** rather than rewriting the parser (D12)
 - [ ] Validate Spark output against §5.1 / §5.3 ground truth (top offender IPs must match)
 - [ ] Configure **EMR managed scaling** (min/max core units + stated trigger + cooldown)
+
+> **Build strategy for the batch layer:** develop the PySpark job against the local `SSH.log`
+> first (fast, no EMR cost), reconcile counts to the shell ground truth, *then* switch the read
+> path to `s3://<bucket>/raw/` with `recursiveFileLookup=true` (D15). Don't debug Spark logic and
+> EMR config at the same time.
 
 ---
 
