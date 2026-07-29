@@ -29,10 +29,31 @@ this volume. Safe to leave up.
 
 | Resource | Name | Config | Status |
 |---|---|---|---|
-| EMR cluster | `scp-siem-emr` | emr-7.13.0 (Spark 3.5.6, Hadoop 3.4.2). 1 primary + 1 core, m5.xlarge. Auto-terminate on 1 h idle | **TERMINATED** |
+| EMR cluster | `scp-siem-emr` | emr-7.13.0 (Spark 3.5.6, Hadoop 3.4.2, Hive 3.1.3, Livy 0.8.0). m5.xlarge. Auto-terminate on 1 h idle | see below |
 
 **Cost:** ~$0.35/hour. **Terminate immediately after every use.** First de-risk run
-(23 Jul, cluster `j-CS2V19449VW5`) took ~1 hour including troubleshooting.
+(23 Jul, cluster `j-CS2V19449VW5`) took ~1 hour including troubleshooting. Second cluster
+(29 Jul, `j-1SGHHVZLSRH8K`) ran the M2 batch layer — Spark batch view + Hadoop Streaming variant.
+
+### EMR managed scaling (configured 29 Jul — the M2 auto-scaling deliverable)
+
+| Setting | Value |
+|---|---|
+| Cluster scaling option | **EMR-managed scaling** |
+| Minimum cluster size | 1 instance |
+| Maximum cluster size | 7 instances |
+| Maximum core nodes | 7 instances |
+| Maximum On-Demand instances | 1 (the primary; core nodes run Spot) |
+
+Max of 7 deliberately matches the **1 / 3 / 5 / 7** core-node sweep Experiment 1 runs, so the
+scaling policy and the benchmark exercise the same range.
+
+**The trigger, stated for the report** (the rubric wants auto-scaling *with stated triggers*, not
+merely enabled): EMR managed scaling does not use a hand-written CloudWatch alarm. It evaluates
+**YARN resource pressure** on a ~5–10 second loop and scales **out** when pending container
+demand exceeds what running nodes can satisfy, and **in** when nodes go idle — bounded by the
+min/max unit limits above, with scale-in protection so nodes holding shuffle data are not
+reclaimed mid-job.
 
 ---
 

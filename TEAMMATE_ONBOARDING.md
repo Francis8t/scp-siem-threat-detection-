@@ -368,7 +368,19 @@ top-offender IPs fired alert rows. Env var `ALERT_THRESHOLD=50` set on the funct
 `fc38b9b464eae746aaed8ceb044bd743`) and every documented ground-truth figure reproduced exactly.
 The batch layer has a trustworthy reconciliation target.
 
-**Batch layer — the remaining M2 block.** The build strategy changed on 29 Jul (D21): **there is
+**Batch layer — DONE and validated (29 Jul).** The full log was replayed into
+`raw/2026/07/29/15/` (313,766 records, 43 Firehose objects). Four independent implementations —
+`batch/reference_counts.py`, the local `mapper.py | sort | reducer.py` pipeline, the EMR PySpark
+job, and EMR Hadoop Streaming — all produce **byte-identical** results across 1,238 IPs:
+160,616 failed / 182 accepted / 14,581 invalid_user / 138,387 other. Only **EMR managed scaling**
+remains in M2.
+
+Two gotchas worth knowing: reconciliation runs must read `raw/2026/07/29/`, not all of `raw/`,
+which still holds 2,300 smoke-test records (D23); and Hadoop Streaming needs
+`-D mapreduce.input.fileinputformat.input.dir.recursive=true` for the same nested-directory
+reason Spark needs `recursiveFileLookup` (D24).
+
+**How the batch layer was built.** The strategy changed on 29 Jul (D21): **there is
 no local Spark step.** The dev machine has no JRE and a Python 3.14 venv PySpark 3.5 doesn't
 support, so instead of prototyping in Spark we write `batch/reference_counts.py` — a plain-Python
 single-process implementation of the same aggregates that reconciles to the ground truth and

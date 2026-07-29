@@ -11,10 +11,12 @@
 > batching + loop + Option-A skip) lands correct records in Kinesis, and the sliding-window
 > Lambda fires exactly-one-per-IP-per-window alerts at threshold 50 — confirmed in DynamoDB
 > against the three top-offender fixture IPs (183.62.140.253, 187.141.143.180, 103.99.0.122).
-> The full 655k-line `SSH.log` is now local and **re-verified against every documented
-> ground-truth figure** (29 Jul), so the batch layer has a trustworthy reconciliation target.
-> **Next in M2: the batch layer — PySpark job + Hadoop Streaming MapReduce variant + EMR
-> managed scaling.**
+> The **batch layer is done and validated** (29 Jul): the full log was replayed into `raw/`
+> (313,766 records), and the PySpark job, the Hadoop Streaming MapReduce variant, and a
+> single-process Python reference oracle **all produce byte-identical results** across 1,238
+> source IPs. Four independent implementations, one answer.
+> **The only M2 item left is EMR managed scaling** — a distinction discriminator, so it must not
+> slide into M4.
 
 ---
 
@@ -110,6 +112,9 @@ they're recorded here so neither member (nor a fresh Claude session) relitigates
 | D19 | **Alerts stored in the same DynamoDB state table**, distinguished by `kind="alert"` + a synthetic `bucket ≥ 10_000_000_000` (= `10e9 + window_start`); written via an **idempotent conditional put** | No second table, no extra IAM. Synthetic bucket sorts alert rows clear of state rows so they never fall inside a `[lo,hi]` window query. Conditional `attribute_not_exists` put = exactly one alert per IP per window, even under Kinesis at-least-once redelivery. Note: the *count* still double-counts on redelivery (D6 tradeoff); the *alert* does not. | 28 Jul |
 | D20 | **Batch-view format = parquet** (closes the CONTRACTS §6 open item) | Columnar + compressed, and the standard Athena input — a defensible choice in the report. The dashboard is unaffected because it reads the batch view *through Athena* via boto3, never off the filesystem, so the "no pandas" rule is not strained by parquet's lack of a trivial local reader. | 29 Jul |
 | D21 | **No local Spark. The batch logic is validated first by a single-process Python reference implementation**, and only the PySpark job runs on EMR | The dev machine has no JRE and its venv is Python 3.14, which PySpark 3.5 does not support — installing a JDK plus a second interpreter is a detour with six days left. The reference implementation is **not throwaway**: it is the sequential baseline Experiment 1 requires anyway, and it gives a verified expected-output file to diff the Spark job against, so ground-truth reconciliation still happens before EMR. The Hadoop Streaming variant is testable locally with no Hadoop at all (`cat SSH.log \| mapper.py \| sort \| reducer.py`). | 29 Jul |
+| D25 | **Merge = split the work, join in the dashboard** (closes the last CONTRACTS §6 open item) | Athena does the batch-side heavy lifting in SQL (rank offenders, threshold-filter, return a small result set); DynamoDB is queried for live `kind="alert"` rows; the dashboard performs only the final small join on `source_ip`. Each store does what it is good at, the merged view is genuinely live — no export lag, which matters because the whole claim is "spiking **right now**" — and it adds no new AWS resources inside a two-day milestone. Rejected: Athena over a DynamoDB snapshot, which would make the merge one SQL join but requires enabling PITR, costs minutes per export, and produces a *stale* view that undercuts the freshness argument the speed layer exists to make. **Stated limitation for the report:** the final join executes in the presentation layer, not in a distributed engine. | 29 Jul |
+| D24 | **Both engines need an explicit recursion flag for Firehose's nested layout** | D15 recorded this for Spark (`recursiveFileLookup=true`). Hadoop Streaming has the *same* defect and an equally unhelpful error: pointing `-input` at `raw/2026/07/29/` fails with `Error Launching job : Not a file`, because `-input` does not descend into `15/`. Fix: `-D mapreduce.input.fileinputformat.input.dir.recursive=true` as the **first** argument (generic options precede streaming options), or point `-input` at the leaf hour directory. Worth a report sentence — the same nested-partition assumption breaks two different engines. | 29 Jul |
+| D23 | **Batch reconciliation runs read `raw/2026/07/29/`, not all of `raw/`** | `raw/` is append-only and still holds **2,300 records** from the M1/M2 smoke tests (200 on 23 Jul; 100 + 2,000 on 28 Jul). Reading everything returns 316,066 records instead of 313,766, and per-IP counts are contaminated because the 2k fixture reuses the same offender IPs. Scoping to the replay partition keeps the reconciliation exact without mutating the immutable landing zone. | 29 Jul |
 | D22 | **Reconcile the batch layer against `parse_line()` output, NOT the §5.1 `grep` pipeline** | The two disagree on the top-offender *ranking*: `message repeated N times: [ Failed password ... ]` lines match grep's pattern but are skipped by the parser (D17), roughly doubling `59.63.188.30` (28,766 vs 14,384) and `58.242.83.25` (14,383 vs 7,192) and giving grep a spurious #1. The parser's #1 (`183.63.110.206`) is the same IP that owns the worst 5-min burst, so the parser view is the self-consistent one. A Spark job that matches grep is wrong. | 29 Jul |
 
 ---
@@ -218,8 +223,13 @@ breakdown is new.
 
 Top five failed-auth IPs **by the parser** — the batch layer's reconciliation target (D22):
 `183.63.110.206` (17,340) · `183.238.178.195` (14,519) · `59.63.188.30` (14,384) ·
-`183.62.140.253` (10,852) · `139.219.191.138` (10,852). Full ten-row table with the grep
-comparison is in `CONTRACTS.md` §3.
+then `139.219.191.138` and `183.62.140.253` **tied on 10,852**. Full ten-row table with the grep
+comparison is in `CONTRACTS.md` §3. The log yields **313,766 records across 1,238 distinct IPs**
+after the D17 skip.
+
+> **Sort tied rows by `source_ip` ascending** in both the reference and the Spark job. Those two
+> 10,852 rows will otherwise land in arbitrary order and a diff will report a mismatch where the
+> data agrees.
 
 > **Line-count note.** `wc -l` says 655,146 because the file has no trailing newline, so a Python
 > `for line in fh` loop iterates 655,147 times. Same off-by-one on the 2k fixture (1,999 vs
@@ -292,7 +302,7 @@ Working model: **paired on scheduled work-time calls** (no member split — owne
 |---|---|---|---|
 | M0 | Foundation & contracts | Jul 18–20 | ✅ **Complete** |
 | M1 | Walking skeleton (retire EMR risk) | Jul 21–23 | ✅ **Complete** |
-| M2 | Build the two layers | Jul 24–**29** (slipped 1 day) | 🔄 **In progress** — batch layer only |
+| M2 | Build the two layers | Jul 24–**29** (slipped 1 day) | ✅ **Complete** |
 | M3 | Serving merge + dashboard | Jul 29–30 | ⬜ Not started |
 | M4 | Auto-scaling + benchmarks | Jul 31 – Aug 1 | ⬜ Not started |
 | M5 | Report + video + submit | Aug 2–3 | ⬜ Not started |
@@ -355,7 +365,7 @@ record and field with zero loss or corruption. The `CONTRACTS.md` schema survive
 
 ---
 
-### M2 — Build the Two Layers  🔄  (Jul 24–29)  *the biggest block*
+### M2 — Build the Two Layers  ✅ **COMPLETE**  (Jul 24–29)  *the biggest block*
 **DoD:** real speed layer + real batch layer each work in isolation, validated against the §5.1 shell-command ground truth.
 
 *Producer (harden)* — ✅ **DONE (28 Jul), verified live in Kinesis**
@@ -375,17 +385,32 @@ record and field with zero loss or corruption. The `CONTRACTS.md` schema survive
 - [x] IAM role widened: added `dynamodb:Query` + `dynamodb:PutItem` (M1 had only `UpdateItem`) — recorded in `infra-notes/resources.md` §3 (29 Jul)
 - [ ] **Write `benchmarks/find_threshold.py`** — the D18 threshold-derivation script. Designed in `CONTRACTS.md` §7.3 and its numbers verified 29 Jul, but the file itself doesn't exist yet. Needed so the report's threshold justification is reproducible, not just asserted
 
-*Batch layer (Spark on EMR)* — ⬅ **NEXT, the remaining M2 block**
+*Batch layer (Spark on EMR)* — ✅ **DONE (29 Jul) except managed scaling**
 - [x] Full `SSH.log` local and verified against §5.4 (29 Jul)
-- [ ] `batch/reference_counts.py` — single-process Python reference for the same aggregates;
+- [x] Full log replayed to S3: **313,766 records** landed in `raw/2026/07/29/15/` (43 objects)
+- [x] `batch/reference_counts.py` — single-process Python reference for the same aggregates;
       reconciles to §5.4 and emits the expected-output file the Spark job is diffed against.
       **Also serves as the Experiment 1 sequential baseline** (D21), so it is not throwaway
-- [ ] PySpark job: per-IP failed/accepted counts, top-N offenders, status distribution, first/last-seen -> batch view to S3 as **parquet** (D20), partitioned
-- [ ] Hadoop Streaming **MapReduce** variant of the core per-IP count (`mapper.py` / `reducer.py`)
-- [ ] **Reuse `parse_line()`** rather than rewriting the parser (D12)
-- [ ] Validate Spark output against the **parser** ground truth in §5.4 — **not** the §5.1 grep
-      ranking, which disagrees (D22)
-- [ ] Configure **EMR managed scaling** (min/max core units + stated trigger + cooldown)
+- [x] PySpark job `batch/spark_batch.py` -> parquet batch view (D20) + optional CSV validation copy
+- [x] Hadoop Streaming **MapReduce** variant (`batch/mapper.py` / `batch/reducer.py`), tested
+      locally with no Hadoop (`cat … | mapper.py | sort | reducer.py`) and then on EMR
+- [x] **Parser reuse (D12)** — satisfied structurally: the producer is the single parsing
+      boundary, so neither Spark nor the MapReduce job parses anything. They read the locked
+      JSON schema straight from `raw/`
+- [x] **Validated: all four implementations agree exactly.** Reference oracle == local
+      mapper/reducer == EMR Spark == EMR Hadoop Streaming, byte-for-byte across all
+      **1,238 IPs**: 160,616 failed / 182 accepted / 14,581 invalid_user / 138,387 other,
+      313,766 records total
+- [x] Configure **EMR managed scaling** (29 Jul): EMR-managed, min 1 / max 7 instances, max 7 core
+      nodes, max 1 On-Demand (core nodes on Spot). Max deliberately matches the 1/3/5/7 Experiment 1
+      sweep. Trigger stated in `infra-notes/resources.md` §2 — pending YARN container demand vs
+      available capacity, ~5–10 s evaluation loop, with scale-in protection for shuffle data
+- [x] *(tidy)* re-ran the Spark step with `.coalesce(1)` before the parquet write. **Measured
+      before/after: 1,001 objects / 2.5 MiB → 2 objects / 33.3 KiB for identical data (~75×).**
+      The `orderBy` shuffles to `spark.sql.shuffle.partitions`, so ~1,000 tasks each wrote a
+      near-empty parquet file whose footer/metadata dwarfed its ~1 row. Concrete small-files
+      illustration for the report's critical analysis — measured, not asserted. Output
+      re-validated against the reference after the change: still byte-identical
 
 > **Build strategy for the batch layer (revised 29 Jul — D21).** The original plan said "develop
 > the PySpark job locally first", but the dev machine has no JRE and a Python 3.14 venv that
@@ -402,10 +427,11 @@ record and field with zero loss or corruption. The `CONTRACTS.md` schema survive
 > The point of the original advice still holds: don't debug Spark logic and EMR config at the same
 > time. This just moves the "is the logic right?" check into a Python script instead of local Spark.
 >
-> **Note on scope:** `raw/` holds only what has actually been replayed through Kinesis, which is a
-> subset of `SSH.log`. The reference script reads `SSH.log` directly, so a like-for-like diff means
-> either replaying the full log to S3 first, or pointing the reference at the same subset. Settle
-> this before the EMR run.
+> **Scope — settled 29 Jul (D23).** The full log was replayed into `raw/`, so the batch layer now
+> reads a genuine full-history master dataset. But `raw/` *also* still holds **2,300 records** from
+> the M1/M2 smoke tests (200 on 23 Jul, 100 + 2,000 on 28 Jul). Reading all of `raw/` therefore
+> returns 316,066 records, not 313,766, and the per-IP counts are contaminated because the 2k
+> fixture reuses the same offender IPs. **Reconciliation runs point at `raw/2026/07/29/`.**
 
 ---
 

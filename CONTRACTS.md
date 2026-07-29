@@ -148,13 +148,20 @@ Every previously-documented figure reproduced exactly; the status breakdown belo
 | 1 | `183.63.110.206` | **17,340** | 17,340 |
 | 2 | `183.238.178.195` | **14,519** | 14,519 |
 | 3 | `59.63.188.30` | **14,384** | 28,766 |
-| 4 | `183.62.140.253` | **10,852** | 10,852 |
-| 5 | `139.219.191.138` | **10,852** | 10,852 |
+| 4= | `139.219.191.138` | **10,852** | 10,852 |
+| 4= | `183.62.140.253` | **10,852** | 10,852 |
 | 6 | `183.192.189.131` | **8,755** | 8,755 |
 | 7 | `183.129.154.138` | **8,670** | 8,670 |
 | 8 | `183.63.172.52` | **7,506** | 7,506 |
 | 9 | `58.242.83.25` | **7,192** | 14,383 |
 | 10 | `14.116.171.251` | **4,462** | — |
+
+> **Tie-break, and why it matters for diffing.** `139.219.191.138` and `183.62.140.253` have
+> *identical* failed counts (10,852). Any two implementations that sort only by count will order
+> tied rows arbitrarily, and a row-by-row diff then reports a mismatch where the data actually
+> agrees. **Sort by `failed` descending, then `source_ip` ascending** — in both the reference and
+> the Spark job — so tied rows land in the same place every time. The table above uses that order.
+> Full log: **1,238 distinct source IPs**, 313,766 records emitted after the D17 skip.
 
 > **Validation trap — read before reconciling the Spark job.** The shell command in
 > `PROJECT_PLAN.md` §5.1 (`grep "Failed password" | ... | sort | uniq -c | sort -rn`) produces a
@@ -261,11 +268,18 @@ heavy redelivery; the alert's existence is still correct. Noted in the report.
 - ✅ **Local Spark prototyping dropped** (D21) — replaced by a single-process Python reference
   implementation that doubles as the Experiment 1 sequential baseline.
 
-**Still open (batch/serving):**
-- **Merge implementation** — dashboard-side join (simplest) vs Athena over an exported DynamoDB
-  snapshot.
-- **EMR managed scaling trigger** — which metric + cooldown. Must be *stated* in the report, not
-  merely enabled.
+- ✅ **Merge implementation = split the work, join in the dashboard** (D25). Athena ranks and
+  threshold-filters the batch view in SQL; DynamoDB supplies live alert rows; the dashboard joins
+  the two small result sets on `source_ip`. Chosen for freshness — a snapshot-based merge would
+  be stale, which contradicts "spiking right now".
+- ✅ **EMR managed scaling** configured 29 Jul: min 1 / max 7 instances, max 7 core nodes, max 1
+  On-Demand. Trigger stated in `infra-notes/resources.md` §2 (pending YARN container demand vs
+  available capacity, ~5–10 s loop, scale-in protection for shuffle data).
+
+**Still open:**
+- Nothing blocking. Remaining work is M3 build-out, then the M4 benchmarks — where the open
+  question is **Experiment 1 input sizing** (the aggregation currently runs in ~1 s, so the
+  dataset needs roughly 50–100× replication for a meaningful speedup curve).
 
 ---
 
