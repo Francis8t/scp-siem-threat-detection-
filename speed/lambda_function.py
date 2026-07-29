@@ -13,9 +13,12 @@ CONTRACTS.md §5. The M1 count logic is unchanged; everything from the window
 query down is new.
 
 Alert storage (settles a CONTRACTS §6 open item): alerts live in the SAME
-state table, distinguished by a sort key of the form  ALERT#<window_start> .
-No second table, no extra IAM. The serving layer already queries this table
-by source_ip, so merged reads stay single-table.
+state table, distinguished by a synthetic numeric sort key
+10_000_000_000 + window_start (the table's sort key is a Number, so alerts
+cannot use a string marker). That value sorts clear of every real 30s bucket,
+so alert rows never fall inside a [lo,hi] window query. No second table, no
+extra IAM. The serving layer already queries this table by source_ip, so
+merged reads stay single-table.
 """
 
 import base64
@@ -52,8 +55,8 @@ def window_sum(source_ip, newest_bucket):
     """Sum `count` across the trailing WINDOW_BUCKETS buckets for this IP.
 
     Query is bounded to the 10-bucket window [oldest, newest] so it never
-    scans the whole partition. Alert rows (SK = 'ALERT#...') are excluded
-    because bucket is numeric and the query range is numeric.
+    scans the whole partition. Alert rows are excluded automatically: their
+    synthetic bucket (10_000_000_000 + window_start) sits far above :hi.
     """
     oldest = newest_bucket - (WINDOW_BUCKETS - 1) * BUCKET_SECONDS
     resp = ddb.query(

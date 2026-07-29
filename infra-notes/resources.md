@@ -1,6 +1,6 @@
 # Live AWS Resources & Runbook
 
-**Account:** 009910375264 (shared) · **Region:** `us-east-1` · **Last updated:** 23 Jul 2026
+**Account:** 009910375264 (shared) · **Region:** `us-east-1` · **Last updated:** 29 Jul 2026
 
 > Shared account: check this file before creating anything (names are unique per
 > account+region), and never tear down a resource you didn't create. Update this file in
@@ -16,7 +16,7 @@
 | DynamoDB table | `scp-siem-speed-state` | PK=`source_ip` (S), SK=`bucket` (N). On-demand. TTL on `ttl` | ACTIVE |
 | S3 bucket | `scp-siem-data-009910375264` | `raw/`, `batch-views/`, `athena-results/`, `scripts/`, `emr-logs/` | ACTIVE |
 | Firehose stream | `scp-siem-firehose` | Source: Kinesis `scp-siem-stream`. Dest: S3 `raw/`. Buffer 1 MiB / 60 s, uncompressed | ACTIVE |
-| Lambda function | `scp-siem-speed` | Python 3.13, **256 MB**, 30 s timeout | ACTIVE |
+| Lambda function | `scp-siem-speed` | Python 3.13, **256 MB** (D14), 30 s timeout. Env: `ALERT_THRESHOLD=50` (D18), `STATE_TABLE` defaults to `scp-siem-speed-state` | ACTIVE |
 | Lambda event source | Kinesis → `scp-siem-speed` | Batch size 100, starting position LATEST | ENABLED |
 | AWS Budget | `scp-siem-monthly` | $80 ceiling; alerts 50% / 100% / forecast-100% | ACTIVE |
 
@@ -40,14 +40,21 @@ this volume. Safe to leave up.
 
 | Role | Purpose | Attached permissions |
 |---|---|---|
-| `scp-siem-lambda-speed-role` | Speed-layer Lambda execution | `AWSLambdaKinesisExecutionRole` (managed) + inline `scp-siem-ddb-write`: `dynamodb:UpdateItem` on the state table |
+| `scp-siem-lambda-speed-role` | Speed-layer Lambda execution | `AWSLambdaKinesisExecutionRole` (managed) + inline `scp-siem-ddb-write`: `dynamodb:UpdateItem`, **`dynamodb:Query`, `dynamodb:PutItem`** on the state table |
 | `AmazonEMR-ServiceRole-20260723T165202` | EMR service role | `AmazonEMRServicePolicy_v2` + auto-generated customer-managed policy |
-| `AmazonEMR-InstanceProfile-20260723T165202` | EMR EC2 instance profile | Auto-generated + inline `scp-siem-emr-s3-access` (see §4.2) |
+| `AmazonEMR-InstanceProfile-20260723T165145` | EMR EC2 instance profile | Auto-generated + inline `scp-siem-emr-s3-access` (see §4.2) |
 | Firehose delivery role | Firehose → S3 | Console auto-created during stream setup |
 | `AWSServiceRoleForEC2Spot` | Service-linked role for Spot | Account-level; created once (see §4.1) |
 
-**At M2 you'll need to add `dynamodb:Query`** to `scp-siem-ddb-write` — the window query needs
-it, and `UpdateItem` alone won't cover it.
+**M2 update (28 Jul): `dynamodb:Query` + `dynamodb:PutItem` were added** to `scp-siem-ddb-write`.
+`Query` backs the trailing-window sum and `PutItem` backs the conditional alert write; the M1
+`UpdateItem`-only policy covered neither. If the window query ever throws
+`AccessDeniedException`, this grant is the first thing to check.
+
+**Note the two EMR roles have different timestamp suffixes** — service role `...T165202`, instance
+profile `...T165145`. That looks like a typo but is correct; the console created them a few
+seconds apart. Picking the wrong one is the §4.2 S3-403 failure mode, so copy from §7, don't
+retype.
 
 ---
 
@@ -137,16 +144,19 @@ accruing, and check the EMR console shows no running clusters.
 
 
 
-######
+---
 
-  s3-bucket-name: scp-siem-data-009910375264
+## 7. Exact identifiers (copy-paste reference)
 
-  the Firehose stream: scp-siem-firehose 
+Console-created names that are easy to mistype and slow to look up again.
 
-  Firehose IAM role name: KinesisFirehoseServiceRole-scp-siem-fire-us-east-1-1784818029868
-
-  EMR release version: emr-7.13.0
-
-  Two IAM role names: AmazonEMR-ServiceRole-20260723T165202 & AmazonEMR-InstanceProfile-20260723T165145
- 
-  Subnet: subnet-03ab5168599977eb2 (us-east-1c)
+| Thing | Value |
+|---|---|
+| S3 bucket | `scp-siem-data-009910375264` |
+| Firehose stream | `scp-siem-firehose` |
+| Firehose IAM role | `KinesisFirehoseServiceRole-scp-siem-fire-us-east-1-1784818029868` |
+| EMR release | `emr-7.13.0` (Spark 3.5.6, Hadoop 3.4.2) |
+| EMR service role | `AmazonEMR-ServiceRole-20260723T165202` |
+| EMR instance profile | `AmazonEMR-InstanceProfile-20260723T165145` (confirmed 29 Jul) |
+| — full ARN | `arn:aws:iam::009910375264:instance-profile/AmazonEMR-InstanceProfile-20260723T165145` |
+| EMR subnet | `subnet-03ab5168599977eb2` (us-east-1c) — public subnet, no NAT gateway |

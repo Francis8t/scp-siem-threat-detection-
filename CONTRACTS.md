@@ -4,7 +4,7 @@ Everything downstream builds against these. Producer, speed layer, batch layer, 
 agree on these exact field names. Change only by team agreement — and when one changes, update
 `report/architecture.svg` and `TEAMMATE_ONBOARDING.md` in the same commit.
 
-**Region: `us-east-1`** · **Last updated:** 28 Jul 2026 (M2 — producer + speed layer)
+**Region: `us-east-1`** · **Last updated:** 29 Jul 2026 (M2 — full-log ground truth verified locally)
 
 ---
 
@@ -122,13 +122,52 @@ Cross-check command (note: `grep -c` counts the repeat lines the parser skips, s
 
 ### Full-log ground truth (skip applied)
 
+Re-verified locally on 29 Jul 2026 against `SSH.log` (MD5 `fc38b9b464eae746aaed8ceb044bd743`).
+Every previously-documented figure reproduced exactly; the status breakdown below is new.
+
 | Metric | Value |
 |---|---|
 | Total lines | 655,146 |
-| `failed` (skip applied) | **160,616** |
+| `status: failed` (skip applied) | **160,616** |
+| `status: invalid_user` | 14,581 |
+| `status: accepted` | 182 |
+| `status: other` | 138,387 |
+| Lines dropped (skip + no-IP) | 341,381 |
 | `grep -c "Failed password"` (raw) | 197,587 |
 | Worst single 5-min window | **157** (`183.63.110.206`) |
 | Attacker peak-window band | **126–157** |
+
+> **Line-count note.** `wc -l` reports 655,146 because the file has no trailing newline; a
+> Python `for line in fh` loop therefore iterates **655,147** times. Same off-by-one on the
+> fixture (1,999 vs 2,000). Not a parser bug — don't "fix" it.
+
+#### Top failed-auth IPs, full log — use THIS list, not `grep`
+
+| Rank | IP | `parse_line()` (skip applied) | Raw `grep` count |
+|---|---|---|---|
+| 1 | `183.63.110.206` | **17,340** | 17,340 |
+| 2 | `183.238.178.195` | **14,519** | 14,519 |
+| 3 | `59.63.188.30` | **14,384** | 28,766 |
+| 4 | `183.62.140.253` | **10,852** | 10,852 |
+| 5 | `139.219.191.138` | **10,852** | 10,852 |
+| 6 | `183.192.189.131` | **8,755** | 8,755 |
+| 7 | `183.129.154.138` | **8,670** | 8,670 |
+| 8 | `183.63.172.52` | **7,506** | 7,506 |
+| 9 | `58.242.83.25` | **7,192** | 14,383 |
+| 10 | `14.116.171.251` | **4,462** | — |
+
+> **Validation trap — read before reconciling the Spark job.** The shell command in
+> `PROJECT_PLAN.md` §5.1 (`grep "Failed password" | ... | sort | uniq -c | sort -rn`) produces a
+> **different ranking** from the parser. `message repeated N times: [ Failed password for root
+> from ... ]` lines contain the string "Failed password" *inside the brackets*, so `grep` counts
+> them while `parse_line()` skips them (D17). The effect is concentrated on the heavy-repeat IPs:
+> `59.63.188.30` and `58.242.83.25` are each roughly **doubled** by grep, which lifts
+> `59.63.188.30` to a spurious #1 at 28,766.
+>
+> **The batch layer must reconcile to the parser column**, because it reuses the same skipping
+> parser (D12). Reassuringly, the parser's #1 (`183.63.110.206`) is the same IP that owns the
+> worst 5-minute burst in the threshold analysis — the parser view is the internally consistent
+> one. A Spark job matching the grep ranking would be the actual bug.
 
 ---
 
@@ -137,7 +176,7 @@ Cross-check command (note: `grep -c` counts the repeat lines the parser skips, s
 Bucket: `scp-siem-data-<ACCOUNT_ID>` (region `us-east-1`)
 
     raw/yyyy/mm/dd/hh/          <- Firehose landing, immutable master dataset (UTC-partitioned)
-    batch-views/                <- Spark batch aggregates (parquet or csv), partitioned
+    batch-views/                <- Spark batch aggregates, PARQUET (D20), partitioned
     athena-results/             <- Athena query output location
 
 Bucket in use: `scp-siem-data-009910375264`
@@ -216,8 +255,13 @@ heavy redelivery; the alert's existence is still correct. Noted in the report.
 - ✅ **Alert threshold = 50** / IP / 5-min window (D18) — off the full-log 126–157 attacker band.
 - ✅ **Alerts storage** — same table, `kind="alert"` + synthetic `bucket` (D19).
 
+**Settled at M2 (29 Jul):**
+- ✅ **Batch-view format = parquet** (D20). Athena reads it natively, so the dashboard is
+  unaffected — it queries Athena via boto3 rather than reading the files directly.
+- ✅ **Local Spark prototyping dropped** (D21) — replaced by a single-process Python reference
+  implementation that doubles as the Experiment 1 sequential baseline.
+
 **Still open (batch/serving):**
-- **Batch-view format** — parquet vs csv (leaning parquet).
 - **Merge implementation** — dashboard-side join (simplest) vs Athena over an exported DynamoDB
   snapshot.
 - **EMR managed scaling trigger** — which metric + cooldown. Must be *stated* in the report, not
@@ -443,9 +487,12 @@ CONTRACTS.md §5. The M1 count logic is unchanged; everything from the window
 query down is new.
 
 Alert storage (settles a CONTRACTS §6 open item): alerts live in the SAME
-state table, distinguished by a sort key of the form  ALERT#<window_start> .
-No second table, no extra IAM. The serving layer already queries this table
-by source_ip, so merged reads stay single-table.
+state table, distinguished by a synthetic numeric sort key
+10_000_000_000 + window_start (the table's sort key is a Number, so alerts
+cannot use a string marker). That value sorts clear of every real 30s bucket,
+so alert rows never fall inside a [lo,hi] window query. No second table, no
+extra IAM. The serving layer already queries this table by source_ip, so
+merged reads stay single-table.
 """
 
 import base64
@@ -482,8 +529,8 @@ def window_sum(source_ip, newest_bucket):
     """Sum `count` across the trailing WINDOW_BUCKETS buckets for this IP.
 
     Query is bounded to the 10-bucket window [oldest, newest] so it never
-    scans the whole partition. Alert rows (SK = 'ALERT#...') are excluded
-    because bucket is numeric and the query range is numeric.
+    scans the whole partition. Alert rows are excluded automatically: their
+    synthetic bucket (10_000_000_000 + window_start) sits far above :hi.
     """
     oldest = newest_bucket - (WINDOW_BUCKETS - 1) * BUCKET_SECONDS
     resp = ddb.query(
@@ -588,8 +635,32 @@ def lambda_handler(event, context):
 
 ### 7.3 `benchmarks/find_threshold.py` (threshold-derivation helper)
 
-Not part of the runtime pipeline — a one-off analysis script that produced the D18 threshold.
+> **Status: specified here, not yet written to `benchmarks/`.** As of 29 Jul 2026 `benchmarks/`
+> contains only `.gitkeep`. The listing below is the agreed design, not a transcript of a
+> committed file — treat it as the spec to implement when the script is written.
+>
+> **The D18 numbers it justifies are nonetheless verified.** On 29 Jul this logic was run against
+> `SSH.log` and reproduced every documented figure exactly: 160,616 failed events, **7,026**
+> distinct (IP, 5-min window) pairs, worst single window **157** (`183.63.110.206`, Jan 03 01:50),
+> and a top-15 peak band of exactly **126–157**. So the threshold justification rests on real
+> evidence and the report can state it with confidence — but committing the script is what makes
+> it *reproducible* by a marker, which is why it stays on the open-items list.
+
+Not part of the runtime pipeline — a one-off analysis script that derives the D18 threshold.
 Reuses `parse_line()` so the threshold basis matches exactly what the Lambda receives.
+
+**Verified peak-window bursts (29 Jul).** The tight clustering is the argument for threshold 50 —
+every confirmed brute-forcer peaks in a narrow band far above it, and no legitimate user comes
+close:
+
+| IP | Peak single 5-min window |
+|---|---|
+| `183.63.110.206` | 157 |
+| `183.63.172.52` | 152 |
+| `183.62.140.253` | 149 |
+| `183.238.178.195` | 148 |
+| `14.116.171.251` | 147 |
+| … (top 15 tail) | down to 126 |
 
 ```python
 """

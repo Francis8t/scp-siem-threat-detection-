@@ -25,23 +25,23 @@ OpenSSH auth events, detects brute-force / credential-stuffing behaviour live
 | `fixtures/`   | OpenSSH_2k.log sample (committed; full log stays out of git) |
 
 ## Local setup
-\`\`\`bash
+```bash
 python3 -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-\`\`\`
+```
 
 ## Run instructions
 _TODO: filled in as each component lands (producer → speed → batch → serving → dashboard)._
 
 ## Data
 Loghub OpenSSH server log — 655,146 events, ~70 MiB, 28.4 days. The 2k sample lives
-in \`fixtures/\`; the full \`OpenSSH.log\` is downloaded locally for S3 upload and kept
-out of git. See \`PROJECT_PLAN.md\` §5.
+in `fixtures/`; the full `SSH.log` is downloaded locally for S3 upload and kept
+out of git. See `PROJECT_PLAN.md` §5.
 
 **Citation:** Zhu, He, He, Liu, Lyu. *Loghub: A Large Collection of System Log Datasets
 for AI-driven Log Analytics.* ISSRE 2023 (arXiv:2008.06448). github.com/logpai/loghub
 
 ## Cost guardrails
-Personal AWS account, **\$80 ceiling** (budget alarm at \$40/\$80). Tear down EMR when
-not benchmarking. No NAT gateway. Kinesis at 1 shard baseline. See \`PROJECT_PLAN.md\` §9.
+Personal AWS account, **$80 ceiling** (budget alarm at $40/$80). Tear down EMR when
+not benchmarking. No NAT gateway. Kinesis at 1 shard baseline. See `PROJECT_PLAN.md` §9.

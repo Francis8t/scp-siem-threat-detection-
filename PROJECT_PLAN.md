@@ -4,13 +4,15 @@
 **Deliverable:** Python-based scalable real-time analytics system on a Lambda architecture (AWS)
 **Due:** 4 August 2026, 17:00 · **Team size:** 2 · **Weighting:** 50% of module
 **Primary dataset:** Loghub OpenSSH logs (locked) · **Region:** `us-east-1`
-**Last updated:** 28 Jul 2026 (M2 in progress — producer + speed layer done)
+**Last updated:** 29 Jul 2026 (M2 in progress — producer + speed layer done; full log verified)
 
 > **Status at a glance:** M0 and M1 complete. M2 **producer hardening** and the **real speed
 > layer** are done and verified live: the hardened producer (rate control + `put_records`
 > batching + loop + Option-A skip) lands correct records in Kinesis, and the sliding-window
 > Lambda fires exactly-one-per-IP-per-window alerts at threshold 50 — confirmed in DynamoDB
 > against the three top-offender fixture IPs (183.62.140.253, 187.141.143.180, 103.99.0.122).
+> The full 655k-line `SSH.log` is now local and **re-verified against every documented
+> ground-truth figure** (29 Jul), so the batch layer has a trustworthy reconciliation target.
 > **Next in M2: the batch layer — PySpark job + Hadoop Streaming MapReduce variant + EMR
 > managed scaling.**
 
@@ -106,6 +108,9 @@ they're recorded here so neither member (nor a fresh Claude session) relitigates
 | D17 | **Option A — skip `message repeated N times` + PAM `authentication failure` lines** in the producer | Streaming project; underlying-data completeness is not the evaluation criterion. Repeat lines (~37k, each = N failures) and PAM lines (~231k, a duplicate view of the same failures + hostname `rhost=` values that violate the dotted-quad `source_ip` contract) are dropped. Accepted as a **deliberate, stated undercount** in the report. Emitting PAM would *double-count* every failure. | 28 Jul |
 | D18 | **Alert threshold = 50 failed auths / IP / 5-min window** | Evidence-based, not a guess. Full-log analysis (skip applied) shows confirmed brute-forcers peak at **126–157** failures in a single 5-min window, tightly banded; legitimate users produce single digits. 50 sits ~10x above legitimate behaviour and below the attacker band, so zero false negatives on real threats and near-zero false positives. 50 (vs 100) chosen for a more sensitive, faster-firing live demo. | 28 Jul |
 | D19 | **Alerts stored in the same DynamoDB state table**, distinguished by `kind="alert"` + a synthetic `bucket ≥ 10_000_000_000` (= `10e9 + window_start`); written via an **idempotent conditional put** | No second table, no extra IAM. Synthetic bucket sorts alert rows clear of state rows so they never fall inside a `[lo,hi]` window query. Conditional `attribute_not_exists` put = exactly one alert per IP per window, even under Kinesis at-least-once redelivery. Note: the *count* still double-counts on redelivery (D6 tradeoff); the *alert* does not. | 28 Jul |
+| D20 | **Batch-view format = parquet** (closes the CONTRACTS §6 open item) | Columnar + compressed, and the standard Athena input — a defensible choice in the report. The dashboard is unaffected because it reads the batch view *through Athena* via boto3, never off the filesystem, so the "no pandas" rule is not strained by parquet's lack of a trivial local reader. | 29 Jul |
+| D21 | **No local Spark. The batch logic is validated first by a single-process Python reference implementation**, and only the PySpark job runs on EMR | The dev machine has no JRE and its venv is Python 3.14, which PySpark 3.5 does not support — installing a JDK plus a second interpreter is a detour with six days left. The reference implementation is **not throwaway**: it is the sequential baseline Experiment 1 requires anyway, and it gives a verified expected-output file to diff the Spark job against, so ground-truth reconciliation still happens before EMR. The Hadoop Streaming variant is testable locally with no Hadoop at all (`cat SSH.log \| mapper.py \| sort \| reducer.py`). | 29 Jul |
+| D22 | **Reconcile the batch layer against `parse_line()` output, NOT the §5.1 `grep` pipeline** | The two disagree on the top-offender *ranking*: `message repeated N times: [ Failed password ... ]` lines match grep's pattern but are skipped by the parser (D17), roughly doubling `59.63.188.30` (28,766 vs 14,384) and `58.242.83.25` (14,383 vs 7,192) and giving grep a spurious #1. The parser's #1 (`183.63.110.206`) is the same IP that owns the worst 5-min burst, so the parser view is the self-consistent one. A Spark job that matches grep is wrong. | 29 Jul |
 
 ---
 
@@ -124,14 +129,25 @@ curl -sL https://raw.githubusercontent.com/logpai/loghub/master/OpenSSH/OpenSSH_
 
 # full log for S3 master dataset + benchmarks (kept OUT of git)
 wget "https://zenodo.org/records/8196385/files/SSH.tar.gz?download=1" -O SSH.tar.gz
-tar -xzf SSH.tar.gz && ls -lh          # extracted log is typically OpenSSH.log
+tar -xzf SSH.tar.gz && ls -lh          # extracted log is SSH.log (~70 MB)
 
-# sanity checks (also a ground-truth reference for the Spark batch job)
-wc -l OpenSSH.log
-grep -c "Failed password" OpenSSH.log
-grep "Failed password" OpenSSH.log | grep -oE 'from [0-9.]+' | awk '{print $2}' \
-  | sort | uniq -c | sort -rn | head        # top offender IPs
+# sanity checks — file-integrity only, NOT the batch-job reconciliation target (see warning below)
+wc -l SSH.log
+grep -c "Failed password" SSH.log
+grep "Failed password" SSH.log | grep -oE 'from [0-9.]+' | awk '{print $2}' \
+  | sort | uniq -c | sort -rn | head        # top offender IPs — grep's ranking, not the parser's
 ```
+
+> ⚠️ **Do not reconcile the Spark job against that last command (D22).** `grep` and
+> `parse_line()` produce **different top-offender rankings**, because `message repeated N times:
+> [ Failed password for root from ... ]` lines match grep's pattern but are skipped by the parser
+> (D17). It roughly doubles the heavy-repeat IPs — `59.63.188.30` reads 28,766 by grep but
+> **14,384** by the parser, enough to hand it a spurious #1 — while most other IPs are unaffected.
+> Use `wc -l` and `grep -c` as **file-integrity checks** (they must return 655,146 and 197,587),
+> and reconcile the batch layer against the **parser** figures in §5.4 and `CONTRACTS.md` §3.
+
+The verified local copy is `SSH.log` at the repo root (gitignored), MD5
+`fc38b9b464eae746aaed8ceb044bd743`.
 
 **Citation (required in report references):** Jieming Zhu, Shilin He, Pinjia He, Jinyang Liu,
 Michael R. Lyu. *Loghub: A Large Collection of System Log Datasets for AI-driven Log Analytics.*
@@ -184,15 +200,30 @@ Top failed-auth IPs: `183.62.140.253` (286) · `187.141.143.180` (80) · `103.99
 
 ### 5.4 Full-log ground truth (skip applied) — the alert-threshold basis
 
-Computed with the canonical `parse_line()` + Option-A skip over the full 655,146-line `SSH.log`:
+Computed with the canonical `parse_line()` + Option-A skip over the full 655,146-line `SSH.log`.
+**Re-verified locally 29 Jul 2026** — every figure below reproduced exactly; the full status
+breakdown is new.
 
 | Metric | Value |
 |---|---|
 | Total lines | 655,146 |
-| `failed` events (skip applied) | **160,616** |
+| `status: failed` (skip applied) | **160,616** |
+| `status: invalid_user` | 14,581 |
+| `status: accepted` | 182 |
+| `status: other` | 138,387 |
+| Lines dropped (skip + no-IP) | 341,381 |
 | Distinct (IP, 5-min window) pairs | 7,026 |
 | **Worst single 5-min window** | **157** (`183.63.110.206`, a Jan-03 burst) |
 | Top-IP peak-window band | **126–157** (tightly clustered) |
+
+Top five failed-auth IPs **by the parser** — the batch layer's reconciliation target (D22):
+`183.63.110.206` (17,340) · `183.238.178.195` (14,519) · `59.63.188.30` (14,384) ·
+`183.62.140.253` (10,852) · `139.219.191.138` (10,852). Full ten-row table with the grep
+comparison is in `CONTRACTS.md` §3.
+
+> **Line-count note.** `wc -l` says 655,146 because the file has no trailing newline, so a Python
+> `for line in fh` loop iterates 655,147 times. Same off-by-one on the 2k fixture (1,999 vs
+> 2,000). Expected, not a parser bug.
 
 Raw `grep -c "Failed password"` on the full log returns **197,587** — higher than 160,616
 because grep counts the ~37k `message repeated` lines the producer skips. This gap is expected
@@ -201,6 +232,12 @@ and is the D17 undercount, stated in the report.
 > The 126–157 band is the justification for the **threshold = 50** decision (D18): well below any
 > real attacker's peak (no false negatives), well above any legitimate user's 5-min failures
 > (near-zero false positives).
+>
+> **Independently re-verified 29 Jul 2026.** 7,026 distinct (IP, 5-min window) pairs; worst window
+> **157** (`183.63.110.206`, Jan 03 01:50); top-15 peak band exactly **126–157**. Every figure
+> matched. Note the analysis script itself (`benchmarks/find_threshold.py`, specified in
+> `CONTRACTS.md` §7.3) has **not been written yet** — the numbers are sound, but the script needs
+> committing before the report claims a reproducible method.
 
 **Data-quality note for the report:** the busiest windows are nearly all `183.63.110.206` on
 "Jan 03". The log nominally spans Dec 2018 but crosses into Jan 2019 with **no year field** — the
@@ -255,7 +292,7 @@ Working model: **paired on scheduled work-time calls** (no member split — owne
 |---|---|---|---|
 | M0 | Foundation & contracts | Jul 18–20 | ✅ **Complete** |
 | M1 | Walking skeleton (retire EMR risk) | Jul 21–23 | ✅ **Complete** |
-| M2 | Build the two layers | Jul 24–28 | 🔄 **Next** |
+| M2 | Build the two layers | Jul 24–**29** (slipped 1 day) | 🔄 **In progress** — batch layer only |
 | M3 | Serving merge + dashboard | Jul 29–30 | ⬜ Not started |
 | M4 | Auto-scaling + benchmarks | Jul 31 – Aug 1 | ⬜ Not started |
 | M5 | Report + video + submit | Aug 2–3 | ⬜ Not started |
@@ -288,7 +325,8 @@ Working model: **paired on scheduled work-time calls** (no member split — owne
 *Data*
 - [x] 2k sample committed -> `fixtures/OpenSSH_2k.log` (D9)
 - [x] Ground-truth counts captured for the 2k fixture (§5.3)
-- [ ] Download full `OpenSSH.log` + run §5.1 sanity checks on it — **carried into M2**
+- [x] Download full `SSH.log` + run §5.1 sanity checks on it — **done 29 Jul**; 655,146 lines and
+      `grep -c` 197,587 both match, and `parse_line()` reproduces the §5.4 figures exactly
 
 ---
 
@@ -317,7 +355,7 @@ record and field with zero loss or corruption. The `CONTRACTS.md` schema survive
 
 ---
 
-### M2 — Build the Two Layers  ⬜  (Jul 24–28)  *the biggest block*
+### M2 — Build the Two Layers  🔄  (Jul 24–29)  *the biggest block*
 **DoD:** real speed layer + real batch layer each work in isolation, validated against the §5.1 shell-command ground truth.
 
 *Producer (harden)* — ✅ **DONE (28 Jul), verified live in Kinesis**
@@ -334,19 +372,40 @@ record and field with zero loss or corruption. The `CONTRACTS.md` schema survive
 - [x] **Alert threshold set to 50** off full-log ground truth (D18; attacker band 126–157)
 - [x] Kinesis at-least-once handled: atomic `ADD` for counts (D6) + **idempotent conditional-put alert** (D19) → exactly one alert per IP per window under redelivery
 - [x] Locally tested with `moto` (mock DynamoDB): window sum, threshold crossing, status filtering, and redelivery-idempotency all pass before deploy
-- [x] IAM role widened: added `dynamodb:Query` + `dynamodb:PutItem` (M1 had only `UpdateItem`) — record in `infra-notes/resources.md`
+- [x] IAM role widened: added `dynamodb:Query` + `dynamodb:PutItem` (M1 had only `UpdateItem`) — recorded in `infra-notes/resources.md` §3 (29 Jul)
+- [ ] **Write `benchmarks/find_threshold.py`** — the D18 threshold-derivation script. Designed in `CONTRACTS.md` §7.3 and its numbers verified 29 Jul, but the file itself doesn't exist yet. Needed so the report's threshold justification is reproducible, not just asserted
 
 *Batch layer (Spark on EMR)* — ⬅ **NEXT, the remaining M2 block**
-- [ ] PySpark job: per-IP failed/accepted counts, top-N offenders, status distribution, first/last-seen -> batch view to S3 (parquet or csv), partitioned
+- [x] Full `SSH.log` local and verified against §5.4 (29 Jul)
+- [ ] `batch/reference_counts.py` — single-process Python reference for the same aggregates;
+      reconciles to §5.4 and emits the expected-output file the Spark job is diffed against.
+      **Also serves as the Experiment 1 sequential baseline** (D21), so it is not throwaway
+- [ ] PySpark job: per-IP failed/accepted counts, top-N offenders, status distribution, first/last-seen -> batch view to S3 as **parquet** (D20), partitioned
 - [ ] Hadoop Streaming **MapReduce** variant of the core per-IP count (`mapper.py` / `reducer.py`)
 - [ ] **Reuse `parse_line()`** rather than rewriting the parser (D12)
-- [ ] Validate Spark output against §5.1 / §5.3 ground truth (top offender IPs must match)
+- [ ] Validate Spark output against the **parser** ground truth in §5.4 — **not** the §5.1 grep
+      ranking, which disagrees (D22)
 - [ ] Configure **EMR managed scaling** (min/max core units + stated trigger + cooldown)
 
-> **Build strategy for the batch layer:** develop the PySpark job against the local `SSH.log`
-> first (fast, no EMR cost), reconcile counts to the shell ground truth, *then* switch the read
-> path to `s3://<bucket>/raw/` with `recursiveFileLookup=true` (D15). Don't debug Spark logic and
-> EMR config at the same time.
+> **Build strategy for the batch layer (revised 29 Jul — D21).** The original plan said "develop
+> the PySpark job locally first", but the dev machine has no JRE and a Python 3.14 venv that
+> PySpark 3.5 doesn't support, so local Spark is an install detour we're skipping. Instead:
+>
+> 1. Write `batch/reference_counts.py` (plain Python, imports `parse_line()`) and reconcile it to
+>    §5.4. This pins the expected numbers with zero AWS cost.
+> 2. Write the PySpark job to produce the *same* aggregates, and the `mapper.py`/`reducer.py`
+>    variant — the latter is fully testable locally with no Hadoop
+>    (`cat SSH.log | mapper.py | sort | reducer.py`).
+> 3. Only then run the PySpark job on EMR against `s3://<bucket>/raw/` with
+>    `recursiveFileLookup=true` (D15), and **diff its output against the reference file**.
+>
+> The point of the original advice still holds: don't debug Spark logic and EMR config at the same
+> time. This just moves the "is the logic right?" check into a Python script instead of local Spark.
+>
+> **Note on scope:** `raw/` holds only what has actually been replayed through Kinesis, which is a
+> subset of `SSH.log`. The reference script reads `SSH.log` directly, so a like-for-like diff means
+> either replaying the full log to S3 first, or pointing the reference at the same subset. Settle
+> this before the EMR run.
 
 ---
 

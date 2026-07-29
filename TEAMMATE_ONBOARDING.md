@@ -4,7 +4,7 @@
 project — what it is, what's been decided and *why*, what's already built, and what happens next.
 It is self-contained: everything needed to contribute is below.
 
-**Last updated:** 28 July 2026 (M2 — producer + speed layer done) · **Deadline:** 4 August 2026, 17:00
+**Last updated:** 29 July 2026 (M2 — producer + speed layer done; full log verified) · **Deadline:** 4 August 2026, 17:00
 
 ---
 
@@ -98,10 +98,13 @@ curl -sL https://raw.githubusercontent.com/logpai/loghub/master/OpenSSH/OpenSSH_
 wget "https://zenodo.org/records/8196385/files/SSH.tar.gz?download=1" -O SSH.tar.gz
 tar -xzf SSH.tar.gz
 
-# ground-truth sanity checks — the Spark output must match these
-wc -l OpenSSH.log
-grep -c "Failed password" OpenSSH.log
-grep "Failed password" OpenSSH.log | grep -oE 'from [0-9.]+' | awk '{print $2}' \
+# file-integrity checks — must return 655146 and 197587
+wc -l SSH.log
+grep -c "Failed password" SSH.log
+
+# top offender IPs by grep — WARNING: this ranking is NOT the Spark reconciliation
+# target. grep and the parser disagree; see 4.3 and PROJECT_PLAN.md D22.
+grep "Failed password" SSH.log | grep -oE 'from [0-9.]+' | awk '{print $2}' \
   | sort | uniq -c | sort -rn | head
 ```
 
@@ -174,6 +177,15 @@ Two irregularities already found and handled:
   fixture `failed` count is **518, not 520** (see 4.4), and why `grep -c "Failed password"` on
   the full log (197,587) exceeds the parser's failed count (160,616): grep counts the repeat
   lines the parser skips.
+- **⚠️ The skip also changes the top-offender *ranking* (M2 / D22).** This one will waste your
+  afternoon if you don't know it. `message repeated N times: [ Failed password for root from
+  ... ]` contains the string "Failed password" inside the brackets, so `grep` counts it and the
+  parser drops it. The effect lands almost entirely on the heavy-repeat IPs: `59.63.188.30` reads
+  **28,766 by grep but 14,384 by the parser**, and `58.242.83.25` reads 14,383 vs 7,192, while
+  most other IPs are identical in both. That is enough to give grep a completely different #1.
+  **Reconcile the batch job to the parser figures** (`CONTRACTS.md` §3), never to the grep
+  ranking. The parser's #1, `183.63.110.206`, is also the IP owning the worst 5-minute burst in
+  the threshold analysis — the parser view is the self-consistent one.
 
 Two more that will bite you when reading `raw/` from S3:
 
@@ -200,11 +212,17 @@ Top failed-auth IPs (unchanged): `183.62.140.253` (286) · `187.141.143.180` (80
 `103.99.0.122` (46). **These three fired the alerts in the live speed-layer test** — nice
 end-to-end confirmation.
 
-**Full log (skip applied):** 160,616 `failed` events; worst single 5-min window = **157**
-(`183.63.110.206`); attacker peak band **126–157** → basis for threshold 50 (D18).
+**Full log (skip applied), re-verified locally 29 Jul 2026:** 160,616 `failed` · 14,581
+`invalid_user` · 182 `accepted` · 138,387 `other` · 341,381 dropped. Worst single 5-min window =
+**157** (`183.63.110.206`); attacker peak band **126–157** → basis for threshold 50 (D18).
+Top five by the parser: `183.63.110.206` (17,340) · `183.238.178.195` (14,519) ·
+`59.63.188.30` (14,384) · `183.62.140.253` (10,852) · `139.219.191.138` (10,852).
 
 Cross-check: `grep -c "Failed password" fixtures/OpenSSH_2k.log` (returns more than the parser —
 that gap is the D17 skip, not a bug).
+
+**Line counts are off by one against `wc -l`** — both files lack a trailing newline, so `wc -l`
+says 655,146 / 1,999 while a Python line loop sees 655,147 / 2,000. Expected.
 
 ### 4.5 S3 layout
 
@@ -346,15 +364,29 @@ window sum; threshold 50; idempotent per-IP-per-window alerts. Verified locally 
 (window sum, crossing, filtering, redelivery-idempotency) *and* live — the three fixture
 top-offender IPs fired alert rows. Env var `ALERT_THRESHOLD=50` set on the function.
 
-**Batch layer — the remaining M2 block.** Build the PySpark job against local `SSH.log` first
-(no EMR cost), reconcile to the skip-applied ground truth, *then* point it at `s3://.../raw/`
-with `recursiveFileLookup=true`. Then the Hadoop Streaming MapReduce variant + EMR managed scaling.
+**Full log verified (29 Jul).** `SSH.log` is now at the repo root (gitignored, MD5
+`fc38b9b464eae746aaed8ceb044bd743`) and every documented ground-truth figure reproduced exactly.
+The batch layer has a trustworthy reconciliation target.
+
+**Batch layer — the remaining M2 block.** The build strategy changed on 29 Jul (D21): **there is
+no local Spark step.** The dev machine has no JRE and a Python 3.14 venv PySpark 3.5 doesn't
+support, so instead of prototyping in Spark we write `batch/reference_counts.py` — a plain-Python
+single-process implementation of the same aggregates that reconciles to the ground truth and
+emits the expected-output file the Spark job gets diffed against. It doubles as the Experiment 1
+sequential baseline M4 needs anyway. The `mapper.py`/`reducer.py` variant is testable locally
+with no Hadoop at all (`cat SSH.log | mapper.py | sort | reducer.py`). Only the PySpark job runs
+on EMR, against `s3://.../raw/` with `recursiveFileLookup=true`. Batch view is **parquet** (D20).
+
+> **Open question before the EMR run:** `raw/` contains only what has actually been replayed
+> through Kinesis, which is a *subset* of `SSH.log`. A like-for-like diff against the reference
+> output means either replaying the full log to S3 first, or pointing the reference script at the
+> same subset. Decide which before spinning up the cluster.
 
 ### ⬜ Ahead — rest of M2 to M5
 
 | Milestone | Focus | Target |
 |---|---|---|
-| **M2** (finishing) | Batch layer: PySpark job + MapReduce variant + EMR managed scaling. Validate against ground truth. | Jul 28–29 |
+| **M2** (finishing) | Batch layer: Python reference baseline → PySpark job + MapReduce variant + EMR managed scaling. Validate against parser ground truth. | Jul 28–29 |
 | **M3** | Serving merge + Streamlit dashboard; end-to-end smoke test | Jul 29–30 |
 | **M4** | Both benchmark experiments; capture CSVs, generate figures, draft analysis; **tear everything down after** | Jul 31 – Aug 1 |
 | **M5** | IEEE report (≤10 pages, 2-column), demo video, submit | Aug 2–3 |
@@ -425,21 +457,31 @@ total: **$30–50**.
 
 ## 10. Open items / decisions still to make
 
+**Still open:**
+
 - [ ] **Sign-up sheet:** confirm the row is filled with the exact question above, and check all
-      existing rows for collisions with another team
-- [ ] **Lecturer heads-up email** re: replayed OpenSSH logs as the source
-- [ ] **Alert threshold** for the speed layer (how many failed auths in 5 min = alert) — to be
-      set at M2 off the back of the ground-truth top-offender counts
-- [ ] **Batch-view format** — parquet vs csv (leaning parquet)
+      existing rows for collisions with another team — **still open since M0, worth closing now**
+- [ ] **Lecturer heads-up email** re: replayed OpenSSH logs as the source — **still open since M0**
 - [ ] **Merge implementation** — simplest is a dashboard-side join; alternative is Athena over
       an exported DynamoDB snapshot
 - [ ] **EMR managed scaling trigger** — which metric + cooldown (e.g. `YARNMemoryAvailablePercentage`
       or pending-container ratio); must be *stated* in the report, not just enabled
-- [ ] **Download the full `OpenSSH.log`** (70 MB, kept out of git) and run the §3 sanity checks —
-      needed before the alert threshold can be set sensibly
-- [ ] **Alerts storage** — separate DynamoDB table vs an attribute on the state table
+- [ ] **Reference vs `raw/` scope** — `raw/` holds only what's been replayed, a subset of
+      `SSH.log`. Decide how the Spark output gets diffed like-for-like against the reference
+- [ ] **Write `benchmarks/find_threshold.py`** — designed and specified in `CONTRACTS.md` §7.3
+      but never actually written. Its numbers were independently verified on 29 Jul, so D18 is
+      sound; committing the script is what makes the threshold justification *reproducible* for
+      the marker
 
-> **Already settled — don't re-open.** `PROJECT_PLAN.md` §4b holds a numbered decision log (D1–D12)
-> with the reasoning behind region, no-Terraform, shared account, shard/billing modes, windowing
-> scheme, schema semantics, and the single-canonical-parser rule. Read it before proposing a
-> change to any of them.
+**Closed since this list was written:**
+
+- [x] **Alert threshold** — 50 failed auths / IP / 5-min window (D18, 28 Jul)
+- [x] **Alerts storage** — same state table, `kind="alert"` + synthetic bucket (D19, 28 Jul)
+- [x] **Batch-view format** — parquet (D20, 29 Jul)
+- [x] **Download the full log** — done and verified 29 Jul; `SSH.log` at repo root, gitignored
+
+> **Already settled — don't re-open.** `PROJECT_PLAN.md` §4b holds a numbered decision log
+> (**D1–D22**) covering region, no-Terraform, shared account, shard/billing modes, windowing
+> scheme, schema semantics, the single-canonical-parser rule, the Option-A skip, the alert
+> threshold and storage, the parquet batch view, the no-local-Spark build strategy, and the
+> grep-vs-parser reconciliation target. Read it before proposing a change to any of them.
