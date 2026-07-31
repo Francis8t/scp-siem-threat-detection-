@@ -272,9 +272,12 @@ heavy redelivery; the alert's existence is still correct. Noted in the report.
   threshold-filters the batch view in SQL; DynamoDB supplies live alert rows; the dashboard joins
   the two small result sets on `source_ip`. Chosen for freshness — a snapshot-based merge would
   be stale, which contradicts "spiking right now".
-- ✅ **EMR managed scaling** configured 29 Jul: min 1 / max 7 instances, max 7 core nodes, max 1
-  On-Demand. Trigger stated in `infra-notes/resources.md` §2 (pending YARN container demand vs
-  available capacity, ~5–10 s loop, scale-in protection for shuffle data).
+- ✅ **EMR auto-scaling = custom automatic scaling** (D29, 30 Jul — supersedes the managed scaling
+  configured on 29 Jul). Core instance group, min 1 / max 7. Scale out on `ContainerPendingRatio`
+  ≥ 0.75; scale in on `YARNMemoryAvailablePercentage` ≥ 75%; 300 s evaluation and cooldown; +2 out,
+  −1 in. Chosen because only custom scaling lets the report state a metric and threshold we
+  actually selected. Full policy and rationale in `infra-notes/resources.md` §2. **Must be off
+  during Experiment 1** (D28).
 
 **Still open:**
 - Nothing blocking. Remaining work is M3 build-out, then the M4 benchmarks — where the open

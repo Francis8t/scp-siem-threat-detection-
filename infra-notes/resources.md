@@ -31,29 +31,53 @@ this volume. Safe to leave up.
 |---|---|---|---|
 | EMR cluster | `scp-siem-emr` | emr-7.13.0 (Spark 3.5.6, Hadoop 3.4.2, Hive 3.1.3, Livy 0.8.0). m5.xlarge. Auto-terminate on 1 h idle | see below |
 
-**Cost:** ~$0.35/hour. **Terminate immediately after every use.** First de-risk run
-(23 Jul, cluster `j-CS2V19449VW5`) took ~1 hour including troubleshooting. Second cluster
-(29 Jul, `j-1SGHHVZLSRH8K`) ran the M2 batch layer — Spark batch view + Hadoop Streaming variant.
+**Cost:** ~$0.35/hour at 1+1; ~$1.54/hour at 1 primary + 7 core. **Terminate immediately after
+every use.** Cluster history — all **TERMINATED** as of 31 Jul:
 
-### EMR managed scaling (configured 29 Jul — the M2 auto-scaling deliverable)
+| Cluster | Date | Purpose | Outcome |
+|---|---|---|---|
+| `j-CS2V19449VW5` | 23 Jul | M1 EMR de-risk | ~1 h including the four §4 failures |
+| `j-1SGHHVZLSRH8K` | 29 Jul | M2 batch layer | Spark batch view + Hadoop Streaming variant |
+| `j-2JFD71W6KALYW` | 30 Jul | Experiment 1, attempt 1 | **Died at 26 min — Spot reclamation** (D30) |
+| `j-1U8SPBNCV3U1P` | 30 Jul | Experiment 1 (On-Demand) | Spark sweep + MapReduce at 7 nodes |
+| `j-0846384SERX5A5OL0U5` | 30 Jul | Sequential baseline | 1+1, ran alongside the sweep |
+| `j-08215763I5JEY4IRNFK4` | 31 Jul | Auto-scaling demo | Scaled **1 → 3 → 5 → 4** (D34) |
 
-| Setting | Value |
-|---|---|
-| Cluster scaling option | **EMR-managed scaling** |
-| Minimum cluster size | 1 instance |
-| Maximum cluster size | 7 instances |
-| Maximum core nodes | 7 instances |
-| Maximum On-Demand instances | 1 (the primary; core nodes run Spot) |
+### EMR auto-scaling — custom automatic scaling (D29, 30 Jul)
 
-Max of 7 deliberately matches the **1 / 3 / 5 / 7** core-node sweep Experiment 1 runs, so the
-scaling policy and the benchmark exercise the same range.
+> **Supersedes the EMR-managed scaling configured on 29 Jul.** The two modes are mutually
+> exclusive. Custom scaling was chosen because the rubric wants auto-scaling **with stated
+> triggers**, and only custom scaling lets us state a metric and threshold we actually chose.
 
-**The trigger, stated for the report** (the rubric wants auto-scaling *with stated triggers*, not
-merely enabled): EMR managed scaling does not use a hand-written CloudWatch alarm. It evaluates
-**YARN resource pressure** on a ~5–10 second loop and scales **out** when pending container
-demand exceeds what running nodes can satisfy, and **in** when nodes go idle — bounded by the
-min/max unit limits above, with scale-in protection so nodes holding shuffle data are not
-reclaimed mid-job.
+**Prerequisites** (both already satisfied — check before recreating a cluster):
+- IAM role **`EMR_AutoScaling_DefaultRole`** must exist. It did *not* exist in this account
+  before 30 Jul, and custom auto scaling is simply not selectable without it. Create with
+  `aws emr create-default-roles`, or accept the console's offer when configuring the policy.
+- Cluster must use **instance groups**, not instance fleets. `scp-siem-emr` uses instance groups.
+
+Applied to the **core** instance group. Bounds: **min 1 / max 7** instances — deliberately the
+same range as the 1/3/5/7 Experiment 1 sweep, so the policy and the benchmark exercise the same
+hardware envelope.
+
+| Rule | Metric | Condition | Action | Cooldown |
+|---|---|---|---|---|
+| Scale **out** | `ContainerPendingRatio` | ≥ 0.75 for 1 evaluation period of 300 s | **+2** instances | 300 s |
+| Scale **in** | `YARNMemoryAvailablePercentage` | ≥ 75% for 1 evaluation period of 300 s | **−1** instance | 300 s |
+
+**Why these choices — the wording the report needs:**
+
+- `ContainerPendingRatio` for scale-out measures *unmet demand directly*: containers are queued
+  that current capacity cannot run. A memory-percentage trigger only infers that indirectly.
+- The rules are **deliberately asymmetric** (out by 2, in by 1). Removing a core node means
+  decommissioning HDFS blocks and shuffle data, so growing fast and shrinking slowly is the safe
+  direction under a scale-in mistake.
+- **Stated tradeoff:** EMR publishes these metrics at roughly 5-minute granularity, so this policy
+  reacts in *minutes*, where EMR-managed scaling reacts in 5–10 seconds. We accept slower reaction
+  in exchange for explicit, defensible triggers, and say so rather than hiding it.
+
+**Must be DISABLED during Experiment 1 (D28).** Any auto-scaling mode resizes the cluster mid-run,
+which would make the core count an unknown variable and every timing meaningless.
+`benchmarks/run_experiment1.py` refuses to start while a scaling policy is attached.
 
 ---
 
@@ -66,6 +90,7 @@ reclaimed mid-job.
 | `AmazonEMR-InstanceProfile-20260723T165145` | EMR EC2 instance profile | Auto-generated + inline `scp-siem-emr-s3-access` (see §4.2) |
 | Firehose delivery role | Firehose → S3 | Console auto-created during stream setup |
 | `AWSServiceRoleForEC2Spot` | Service-linked role for Spot | Account-level; created once (see §4.1) |
+| `EMR_AutoScaling_DefaultRole` | Lets EMR resize instance groups from CloudWatch alarms | Required by custom auto scaling (D29). **Did not exist before 30 Jul** — `aws emr create-default-roles` |
 
 **M2 update (28 Jul): `dynamodb:Query` + `dynamodb:PutItem` were added** to `scp-siem-ddb-write`.
 `Query` backs the trailing-window sum and `PutItem` backs the conditional alert write; the M1
@@ -140,12 +165,21 @@ Fix — required in every job that reads `raw/`:
 
 ## 5. Cluster relaunch procedure (M2 / M4)
 
-1. EMR → Clusters → select the terminated `scp-siem-emr` → **Clone** (preserves all config)
-2. Adjust instance counts for the benchmark tier (1 / 3 / 5 / 7 core nodes)
-3. Verify the instance profile still carries `scp-siem-emr-s3-access`
-4. Confirm auto-termination on idle is set
-5. Submit step (Application location = full `.py` path, Deploy mode = Client)
-6. **Terminate when done**
+1. EMR → Clusters → select the terminated `scp-siem-emr` → **Clone**. **Answer NO to "include
+   steps"** — otherwise the whole historical step list (including the failures) replays.
+2. Set core nodes to the starting tier (1 for the Experiment 1 sweep), and set the core group's
+   purchasing option to **On-Demand** for any measurement run (D30). Spot reclamation terminated
+   the first Experiment 1 attempt 26 minutes in; the whole sweep costs ~$1.92 On-Demand.
+3. **Set the cluster scaling option deliberately.** For Experiment 1 turn scaling **off** (D28).
+   For the auto-scaling demonstration select **custom automatic scaling** and apply the §2 policy.
+   Scaling settings do **not** reliably survive a clone — always re-check this tab.
+4. Verify the instance profile still carries `scp-siem-emr-s3-access`
+5. Confirm auto-termination on idle is set
+6. Submit step (Application location = full `.py` path, Deploy mode = Client). In the Arguments
+   field, `spark-submit --deploy-mode client` must appear **exactly once** — cloning a step
+   pre-fills it, and pasting a full command on top duplicates it, which fails with
+   `File ... /spark-submit does not exist`.
+7. **Terminate when done**
 
 ---
 

@@ -31,3 +31,11 @@ fixtures/OpenSSH.log
 metastore_db/
 derby.log
 spark-warehouse/
+
+# --- Benchmark run artifacts ---
+# Console logs and the partial CSVs from interrupted runs. The authoritative
+# results are experiment1_raw.csv / experiment1_summary.csv, rebuilt from AWS
+# by benchmarks/recover_experiment1.py, and experiment2_raw.csv.
+benchmarks/*.log
+benchmarks/experiment1_raw.n1-only.csv
+benchmarks/experiment1_raw.runner-partial.csv

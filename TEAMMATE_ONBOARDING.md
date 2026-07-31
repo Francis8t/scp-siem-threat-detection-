@@ -4,7 +4,16 @@
 project — what it is, what's been decided and *why*, what's already built, and what happens next.
 It is self-contained: everything needed to contribute is below.
 
-**Last updated:** 29 July 2026 (M2 — producer + speed layer done; full log verified) · **Deadline:** 4 August 2026, 17:00
+**Last updated:** 31 July 2026 (M0–M4 complete; only the report + video remain) · **Deadline:** 4 August 2026, 17:00
+
+> **Benchmark headlines, all measured on 4.44 GB / 31,376,600 records with byte-identical output:**
+> sequential **612 s** · Spark **155.4 / 56.3 / 37.0 / 30.5 s** at 1/3/5/7 core nodes
+> (**5.09× speedup, 72.8% efficiency**) · Hadoop Streaming **3,732 s** at 7 nodes.
+> Two results worth leading with: Spark beats a single process **3.94× on one node** (four cores
+> fetching S3 concurrently), and Hadoop Streaming on **seven** nodes is **six times slower than
+> not distributing at all**, because 4,300 map tasks each pay a JVM launch plus a Python fork.
+> Speed layer: shard saturates at **~1,240 rec/s**; sustained capacity is 500–1,000 rec/s.
+> Auto-scaling fired both ways: **1 → 3 → 5 → 4** core nodes.
 
 ---
 
@@ -68,7 +77,7 @@ reputation. **The split is the point** — that's the argument the report leans 
 | Batch layer | **PySpark on EMR** + **Hadoop Streaming MapReduce** variant | Full-history aggregates; MapReduce enables the seq-vs-parallel benchmark |
 | Serving layer | **S3 + Athena** (batch view) ⋈ **DynamoDB** (speed view) | The merged priority view |
 | Visualisation | **Streamlit** dashboard | Live spiking IPs, merged offenders, alert time-series |
-| Auto-scaling | **EMR managed scaling** (configured policy) · Lambda concurrency (native, per shard) | Elastic compute |
+| Auto-scaling | **EMR custom automatic scaling** (CloudWatch metric rules we define — D29) · Lambda concurrency (native, per shard) | Elastic compute with explicitly stated triggers |
 | Benchmarks | **CloudWatch** + boto3 → CSV → **matplotlib** | Repeatable figures for the report |
 
 **Deliberately excluded — do not reintroduce:**
@@ -372,8 +381,8 @@ The batch layer has a trustworthy reconciliation target.
 `raw/2026/07/29/15/` (313,766 records, 43 Firehose objects). Four independent implementations —
 `batch/reference_counts.py`, the local `mapper.py | sort | reducer.py` pipeline, the EMR PySpark
 job, and EMR Hadoop Streaming — all produce **byte-identical** results across 1,238 IPs:
-160,616 failed / 182 accepted / 14,581 invalid_user / 138,387 other. Only **EMR managed scaling**
-remains in M2.
+160,616 failed / 182 accepted / 14,581 invalid_user / 138,387 other. **M2 and M3 are both
+complete**; M4 (benchmarks + the auto-scaling demonstration) is in progress.
 
 Two gotchas worth knowing: reconciliation runs must read `raw/2026/07/29/`, not all of `raw/`,
 which still holds 2,300 smoke-test records (D23); and Hadoop Streaming needs
@@ -398,7 +407,8 @@ on EMR, against `s3://.../raw/` with `recursiveFileLookup=true`. Batch view is *
 
 | Milestone | Focus | Target |
 |---|---|---|
-| **M2** (finishing) | Batch layer: Python reference baseline → PySpark job + MapReduce variant + EMR managed scaling. Validate against parser ground truth. | Jul 28–29 |
+| **M2** | Batch layer: Python reference baseline → PySpark job + MapReduce variant + auto-scaling config. Validated against parser ground truth. | ✅ Jul 28–29 |
+| **M3** | Athena table + merge logic + Streamlit dashboard + end-to-end smoke test. Speed layer optimised (D26). | ✅ Jul 29–30 |
 | **M3** | Serving merge + Streamlit dashboard; end-to-end smoke test | Jul 29–30 |
 | **M4** | Both benchmark experiments; capture CSVs, generate figures, draft analysis; **tear everything down after** | Jul 31 – Aug 1 |
 | **M5** | IEEE report (≤10 pages, 2-column), demo video, submit | Aug 2–3 |
@@ -444,7 +454,11 @@ total: **$30–50**.
 - **Never create a NAT gateway** — keep EMR/EC2 in a public subnet or use VPC endpoints.
   A forgotten NAT gateway alone can eat the whole budget.
 - **Kinesis stays at 1 shard** baseline; scale up only during a benchmark run, then back down.
-- Use **spot instances** for EMR core nodes.
+- **Spot for exploration, On-Demand for measurement (D30).** Spot is ~70% cheaper but AWS can
+  reclaim it at any moment, and losing all core nodes terminates the cluster. That killed the
+  first Experiment 1 run 26 minutes in (`All slaves in the job flow were terminated due to Spot`).
+  The whole sweep is ~$1.92 On-Demand vs ~$0.58 Spot — pay the difference for anything that has
+  to finish in one uninterrupted pass.
 - Kinesis (~$0.36/day) and DynamoDB (on-demand, effectively free at this volume) are cheap
   enough to leave running through M1–M4. EMR is the one to be strict about.
 - Tag everything `Project=scp-siem` so spend is filterable in Cost Explorer.
@@ -476,8 +490,11 @@ total: **$30–50**.
 - [ ] **Lecturer heads-up email** re: replayed OpenSSH logs as the source — **still open since M0**
 - [ ] **Merge implementation** — simplest is a dashboard-side join; alternative is Athena over
       an exported DynamoDB snapshot
-- [ ] **EMR managed scaling trigger** — which metric + cooldown (e.g. `YARNMemoryAvailablePercentage`
-      or pending-container ratio); must be *stated* in the report, not just enabled
+- [x] **EMR auto-scaling trigger** — settled 30 Jul (D29): **custom** automatic scaling, scale out
+      on `ContainerPendingRatio` ≥ 0.75, scale in on `YARNMemoryAvailablePercentage` ≥ 75%, 300 s
+      evaluation and cooldown, +2 out / −1 in, bounds 1–7. Chosen over EMR-managed scaling
+      precisely because the trigger has to be *stated*, and managed scaling gives you no threshold
+      of your own to state
 - [ ] **Reference vs `raw/` scope** — `raw/` holds only what's been replayed, a subset of
       `SSH.log`. Decide how the Spark output gets diffed like-for-like against the reference
 - [ ] **Write `benchmarks/find_threshold.py`** — designed and specified in `CONTRACTS.md` §7.3
